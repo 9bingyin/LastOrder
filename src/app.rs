@@ -7,7 +7,7 @@ use ratatui::DefaultTerminal;
 use tokio::sync::mpsc;
 
 use crate::{
-    net::{self, NetEvent, Session},
+    net::{self, Link, NetEvent, Session},
     ui,
 };
 
@@ -24,8 +24,13 @@ enum Screen {
 struct NetworkView {
     network_id: String,
     endpoint_id: String,
-    peers: BTreeMap<String, String>,
+    peers: BTreeMap<String, PeerState>,
     status: String,
+}
+
+struct PeerState {
+    latency: String,
+    link: Link,
 }
 
 enum Command {
@@ -170,9 +175,9 @@ impl App {
         self.events = Some(receiver);
         self.screen = Screen::Network(NetworkView {
             network_id,
-            endpoint_id: "上线中".to_string(),
+            endpoint_id: String::new(),
             peers: BTreeMap::new(),
-            status: "正在上线".to_string(),
+            status: String::new(),
         });
     }
 
@@ -207,16 +212,22 @@ impl App {
             NetEvent::Ready { endpoint_id } => view.endpoint_id = endpoint_id,
             NetEvent::Status(status) => view.status = status,
             NetEvent::PeerJoined(peer) => {
-                view.peers
-                    .entry(peer)
-                    .or_insert_with(|| "测量中".to_string());
+                view.peers.entry(peer).or_insert_with(|| PeerState {
+                    latency: "测量中".to_string(),
+                    link: Link::Unknown,
+                });
             }
             NetEvent::PeerLeft(peer) => {
                 view.peers.remove(&peer);
             }
+            NetEvent::Link { peer, link } => {
+                if let Some(state) = view.peers.get_mut(&peer) {
+                    state.link = link;
+                }
+            }
             NetEvent::Latency { peer, rtt } => {
-                if let Some(latency) = view.peers.get_mut(&peer) {
-                    *latency = rtt.map(format_rtt).unwrap_or_else(|| "不可达".to_string());
+                if let Some(state) = view.peers.get_mut(&peer) {
+                    state.latency = rtt.map(format_rtt).unwrap_or_else(|| "不可达".to_string());
                 }
             }
             NetEvent::Failed(error) => view.status = error,
@@ -237,7 +248,11 @@ impl App {
                 peers: view
                     .peers
                     .iter()
-                    .map(|(id, latency)| PeerRow { id, latency })
+                    .map(|(id, peer)| PeerRow {
+                        id,
+                        latency: &peer.latency,
+                        link: peer.link,
+                    })
                     .collect(),
                 status: &view.status,
             },
@@ -261,6 +276,7 @@ pub(crate) enum ScreenView<'a> {
 pub(crate) struct PeerRow<'a> {
     pub id: &'a str,
     pub latency: &'a str,
+    pub link: Link,
 }
 
 fn format_rtt(rtt: Duration) -> String {

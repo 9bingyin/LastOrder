@@ -1,26 +1,43 @@
-use std::{collections::HashSet, str::FromStr, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    str::FromStr,
+    time::{Duration, Instant},
+};
 
 use anyhow::{Context, Result, anyhow};
 use futures_util::StreamExt;
 use iroh::{
     Endpoint, EndpointAddr, EndpointId, SecretKey,
     address_lookup::{EndpointInfo, N0_DNS_PKARR_RELAY_PROD, PkarrRelayClient, UserData},
-    endpoint::{Connection, presets},
+    endpoint::{Connection, PathList, presets},
     protocol::{AcceptError, ProtocolHandler, Router},
 };
 use iroh_gossip::{Gossip, TopicId, api::Event};
-use iroh_ping::Ping;
 use tokio::sync::{mpsc, watch};
 use url::Url;
 
 const DISCOVERY_INTERVAL: Duration = Duration::from_secs(3);
 const PING_INTERVAL: Duration = Duration::from_secs(2);
 
+/// How this node currently reaches a member.
+///
+/// `Direct` is a selected IP path. `Relay` is a selected relay path.
+/// `Down` means the connection is gone or has no usable path. `Unknown`
+/// is only the state before the first observation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Link {
+    Unknown,
+    Direct,
+    Relay,
+    Down,
+}
+
 pub enum NetEvent {
     Ready { endpoint_id: String },
     Status(String),
     PeerJoined(String),
     PeerLeft(String),
+    Link { peer: String, link: Link },
     Latency { peer: String, rtt: Option<Duration> },
     Failed(String),
 }
@@ -66,7 +83,6 @@ async fn run(
     events: mpsc::UnboundedSender<NetEvent>,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
-    let _ = events.send(NetEvent::Status("正在上线".to_string()));
     let endpoint = Endpoint::bind(presets::N0).await?;
     tokio::select! {
         biased;
@@ -88,7 +104,6 @@ async fn run(
     });
 
     let gossip = Gossip::builder().spawn(endpoint.clone());
-    let ping = Ping::new();
     let router = Router::builder(endpoint.clone())
         .accept(iroh_gossip::ALPN, gossip.clone())
         .accept(iroh_ping::ALPN, PingReply)
@@ -98,10 +113,8 @@ async fn run(
     let relay = discovery_client(&endpoint)?;
     let network_key = network_secret(&network_id);
     let mut discovery = tokio::time::interval(DISCOVERY_INTERVAL);
-    let mut ping_interval = tokio::time::interval(PING_INTERVAL);
-    let mut announced: Option<EndpointId> = None;
     let mut peers: HashSet<EndpointId> = HashSet::new();
-    let mut ping_task: Option<tokio::task::JoinHandle<()>> = None;
+    let mut peer_tasks: HashMap<EndpointId, tokio::task::JoinHandle<()>> = HashMap::new();
 
     loop {
         tokio::select! {
@@ -113,22 +126,13 @@ async fn run(
             _ = discovery.tick() => {
                 match lookup_bootstrap(&relay, &network_key).await {
                     Ok(Some(peer)) if peer != endpoint_id => {
-                        if announced != Some(peer) {
-                            announced = Some(peer);
-                            let _ = events.send(NetEvent::Status(format!(
-                                "正在连接 {}",
-                                peer.fmt_short()
-                            )));
-                        }
                         if let Err(error) = sender.join_peers(vec![peer]).await {
                             let _ = events.send(NetEvent::Status(format!("连接失败: {error}")));
                         }
                     }
                     Ok(_) => {
                         if peers.is_empty() {
-                            let _ = events.send(NetEvent::Status(
-                                "等待同一网络的其他节点".to_string(),
-                            ));
+                            let _ = events.send(NetEvent::Status(String::new()));
                         }
                     }
                     Err(error) => {
@@ -139,33 +143,34 @@ async fn run(
                     let _ = events.send(NetEvent::Status(format!("发布网络入口失败: {error}")));
                 }
             }
-            _ = ping_interval.tick() => {
-                let busy = ping_task.as_ref().is_some_and(|task| !task.is_finished());
-                if !busy && !peers.is_empty() {
-                    ping_task = Some(spawn_pings(
-                        endpoint.clone(),
-                        ping.clone(),
-                        peers.iter().copied().collect(),
-                        events.clone(),
-                    ));
-                }
-            }
             event = receiver.next() => {
                 match event {
                     Some(Ok(Event::NeighborUp(peer))) => {
                         let label = peer.fmt_short().to_string();
                         peers.insert(peer);
                         let _ = events.send(NetEvent::PeerJoined(label));
-                        let _ = events.send(NetEvent::Status("已加入私有网络".to_string()));
+                        let restart = peer_tasks
+                            .get(&peer)
+                            .is_none_or(tokio::task::JoinHandle::is_finished);
+                        if restart {
+                            if let Some(task) = peer_tasks.remove(&peer) {
+                                task.abort();
+                            }
+                            peer_tasks.insert(
+                                peer,
+                                spawn_peer(endpoint.clone(), peer, events.clone()),
+                            );
+                        }
                     }
                     Some(Ok(Event::NeighborDown(peer))) => {
                         let label = peer.fmt_short().to_string();
                         peers.remove(&peer);
+                        if let Some(task) = peer_tasks.remove(&peer) {
+                            task.abort();
+                        }
                         let _ = events.send(NetEvent::PeerLeft(label));
                         if peers.is_empty() {
-                            let _ = events.send(NetEvent::Status(
-                                "等待同一网络的其他节点".to_string(),
-                            ));
+                            let _ = events.send(NetEvent::Status(String::new()));
                         }
                     }
                     Some(Ok(_)) => {}
@@ -178,7 +183,7 @@ async fn run(
         }
     }
 
-    if let Some(task) = ping_task {
+    for task in peer_tasks.into_values() {
         task.abort();
     }
     router.shutdown().await?;
@@ -186,21 +191,102 @@ async fn run(
     Ok(())
 }
 
-fn spawn_pings(
+fn spawn_peer(
     endpoint: Endpoint,
-    ping: Ping,
-    peers: Vec<EndpointId>,
+    peer: EndpointId,
     events: mpsc::UnboundedSender<NetEvent>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        for peer in peers {
-            let rtt = ping.ping(&endpoint, EndpointAddr::from(peer)).await.ok();
-            let _ = events.send(NetEvent::Latency {
-                peer: peer.fmt_short().to_string(),
-                rtt,
-            });
+        let label = peer.fmt_short().to_string();
+        let connection = match endpoint
+            .connect(EndpointAddr::from(peer), iroh_ping::ALPN)
+            .await
+        {
+            Ok(connection) => connection,
+            Err(_) => {
+                let _ = events.send(NetEvent::Link {
+                    peer: label.clone(),
+                    link: Link::Down,
+                });
+                let _ = events.send(NetEvent::Latency {
+                    peer: label,
+                    rtt: None,
+                });
+                return;
+            }
+        };
+        let watched = connection.clone();
+        let mut paths = watched.paths_stream();
+        let mut ping_interval = tokio::time::interval(PING_INTERVAL);
+        ping_interval.tick().await;
+        loop {
+            tokio::select! {
+                biased;
+                event = paths.next() => {
+                    match event {
+                        Some(list) => {
+                            if let Some(link) = link_from_paths(&list) {
+                                let _ = events.send(NetEvent::Link {
+                                    peer: label.clone(),
+                                    link,
+                                });
+                            }
+                        }
+                        None => {
+                            let _ = events.send(NetEvent::Link {
+                                peer: label,
+                                link: Link::Down,
+                            });
+                            break;
+                        }
+                    }
+                }
+                _ = ping_interval.tick() => {
+                    let rtt = ping_once(&connection).await.ok();
+                    let link = link_from_paths(&connection.paths()).unwrap_or(Link::Down);
+                    let _ = events.send(NetEvent::Latency {
+                        peer: label.clone(),
+                        rtt,
+                    });
+                    let _ = events.send(NetEvent::Link {
+                        peer: label.clone(),
+                        link,
+                    });
+                }
+            }
         }
     })
+}
+
+fn link_from_paths(paths: &PathList<'_>) -> Option<Link> {
+    let path = paths.iter().find(|path| path.is_selected())?;
+    Some(if path.is_ip() {
+        Link::Direct
+    } else if path.is_relay() {
+        Link::Relay
+    } else {
+        Link::Down
+    })
+}
+
+async fn ping_once(connection: &Connection) -> Result<Duration> {
+    let (mut send, mut recv) = connection
+        .open_bi()
+        .await
+        .context("failed to open ping stream")?;
+    let start = Instant::now();
+    send.write_all(b"PING")
+        .await
+        .context("failed to send ping")?;
+    send.finish().context("failed to finish ping")?;
+    let response = recv
+        .read_to_end(4)
+        .await
+        .context("failed to read ping reply")?;
+    if response.as_slice() != b"PONG" {
+        return Err(anyhow!("unexpected ping reply"));
+    }
+    Ok(start.elapsed())
 }
 
 /// Answers `iroh-ping` without writing to the terminal.
@@ -212,22 +298,22 @@ struct PingReply;
 
 impl ProtocolHandler for PingReply {
     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
-        let (mut send, mut recv) = connection
-            .accept_bi()
-            .await
-            .map_err(AcceptError::from_err)?;
-        let request = recv.read_to_end(4).await.map_err(AcceptError::from_err)?;
-        if request.as_slice() != b"PING" {
-            return Err(AcceptError::from_err(std::io::Error::other(
-                "unexpected ping request",
-            )));
+        loop {
+            let (mut send, mut recv) = match connection.accept_bi().await {
+                Ok(streams) => streams,
+                Err(_) => return Ok(()),
+            };
+            let request = recv.read_to_end(4).await.map_err(AcceptError::from_err)?;
+            if request.as_slice() != b"PING" {
+                return Err(AcceptError::from_err(std::io::Error::other(
+                    "unexpected ping request",
+                )));
+            }
+            send.write_all(b"PONG")
+                .await
+                .map_err(AcceptError::from_err)?;
+            send.finish().map_err(AcceptError::from_err)?;
         }
-        send.write_all(b"PONG")
-            .await
-            .map_err(AcceptError::from_err)?;
-        send.finish().map_err(AcceptError::from_err)?;
-        connection.closed().await;
-        Ok(())
     }
 }
 
@@ -297,7 +383,7 @@ mod tests {
     use anyhow::{Result, anyhow};
     use tokio::sync::mpsc;
 
-    use super::{NetEvent, Session, generate_network_id, network_secret, topic_id};
+    use super::{Link, NetEvent, Session, generate_network_id, network_secret, topic_id};
 
     #[test]
     fn generated_network_id_is_grouped_hex() -> Result<()> {
@@ -334,16 +420,29 @@ mod tests {
         let discovered = tokio::time::timeout(std::time::Duration::from_secs(45), async {
             let mut joined = [false, false];
             let mut measured = [false, false];
+            let mut linked = [false, false];
             loop {
                 tokio::select! {
                     event = rx_a.recv() => {
-                        note_event(event, &mut notes, &mut joined[0], &mut measured[0])?;
+                        note_event(
+                            event,
+                            &mut notes,
+                            &mut joined[0],
+                            &mut measured[0],
+                            &mut linked[0],
+                        )?;
                     }
                     event = rx_b.recv() => {
-                        note_event(event, &mut notes, &mut joined[1], &mut measured[1])?;
+                        note_event(
+                            event,
+                            &mut notes,
+                            &mut joined[1],
+                            &mut measured[1],
+                            &mut linked[1],
+                        )?;
                     }
                 }
-                if joined == [true, true] && measured == [true, true] {
+                if joined == [true, true] && measured == [true, true] && linked == [true, true] {
                     return Ok(());
                 }
             }
@@ -356,7 +455,7 @@ mod tests {
         match discovered {
             Ok(result) => result,
             Err(_) => Err(anyhow!(
-                "peers with the same network id did not find each other or report latency: {}",
+                "peers with the same network id did not find each other, report latency, or classify the path: {}",
                 notes.join(" | ")
             )),
         }
@@ -367,10 +466,15 @@ mod tests {
         notes: &mut Vec<String>,
         joined: &mut bool,
         measured: &mut bool,
+        linked: &mut bool,
     ) -> Result<()> {
         match event {
             Some(NetEvent::PeerJoined(_)) => *joined = true,
             Some(NetEvent::Latency { rtt: Some(_), .. }) => *measured = true,
+            Some(NetEvent::Link {
+                link: Link::Direct | Link::Relay,
+                ..
+            }) => *linked = true,
             Some(NetEvent::Status(status) | NetEvent::Failed(status)) => notes.push(status),
             Some(_) => {}
             None => return Err(anyhow!("network session closed")),
