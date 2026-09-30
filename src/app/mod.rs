@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, time::Duration};
+use std::collections::BTreeMap;
 
 use anyhow::Result;
 use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
@@ -7,31 +7,17 @@ use ratatui::DefaultTerminal;
 use tokio::sync::mpsc;
 
 use crate::{
-    net::{self, Link, NetEvent, Session},
+    net::{self, NetEvent, Session},
     ui,
 };
 
+use self::view::{NetworkView, Screen};
+
+mod view;
+
+pub(crate) use view::{PeerRow, ScreenView};
+
 const NETWORK_ID_LIMIT: usize = 128;
-
-enum Screen {
-    Join {
-        input: String,
-        error: Option<String>,
-    },
-    Network(NetworkView),
-}
-
-struct NetworkView {
-    network_id: String,
-    endpoint_id: String,
-    peers: BTreeMap<String, PeerState>,
-    status: String,
-}
-
-struct PeerState {
-    latency: String,
-    link: Link,
-}
 
 enum Command {
     None,
@@ -92,6 +78,10 @@ async fn recv_net(events: &mut Option<mpsc::UnboundedReceiver<NetEvent>>) -> Opt
 }
 
 impl App {
+    pub(crate) fn screen_kind(&self) -> ScreenView<'_> {
+        view::screen_view(&self.screen)
+    }
+
     fn on_event(&mut self, event: Event) -> Result<Command> {
         let Event::Key(key) = event else {
             return Ok(Command::None);
@@ -208,84 +198,6 @@ impl App {
         let Screen::Network(view) = &mut self.screen else {
             return;
         };
-        match event {
-            NetEvent::Ready { endpoint_id } => view.endpoint_id = endpoint_id,
-            NetEvent::Status(status) => view.status = status,
-            NetEvent::PeerJoined(peer) => {
-                view.peers.entry(peer).or_insert_with(|| PeerState {
-                    latency: "测量中".to_string(),
-                    link: Link::Unknown,
-                });
-            }
-            NetEvent::PeerLeft(peer) => {
-                view.peers.remove(&peer);
-            }
-            NetEvent::Link { peer, link } => {
-                if let Some(state) = view.peers.get_mut(&peer) {
-                    state.link = link;
-                }
-            }
-            NetEvent::Latency { peer, rtt } => {
-                if let Some(state) = view.peers.get_mut(&peer) {
-                    state.latency = rtt.map(format_rtt).unwrap_or_else(|| "不可达".to_string());
-                }
-            }
-            NetEvent::Failed(error) => view.status = error,
-        }
-    }
-}
-
-impl App {
-    pub(crate) fn screen_kind(&self) -> ScreenView<'_> {
-        match &self.screen {
-            Screen::Join { input, error } => ScreenView::Join {
-                input,
-                error: error.as_deref(),
-            },
-            Screen::Network(view) => ScreenView::Network {
-                network_id: &view.network_id,
-                endpoint_id: &view.endpoint_id,
-                peers: view
-                    .peers
-                    .iter()
-                    .map(|(id, peer)| PeerRow {
-                        id,
-                        latency: &peer.latency,
-                        link: peer.link,
-                    })
-                    .collect(),
-                status: &view.status,
-            },
-        }
-    }
-}
-
-pub(crate) enum ScreenView<'a> {
-    Join {
-        input: &'a str,
-        error: Option<&'a str>,
-    },
-    Network {
-        network_id: &'a str,
-        endpoint_id: &'a str,
-        peers: Vec<PeerRow<'a>>,
-        status: &'a str,
-    },
-}
-
-pub(crate) struct PeerRow<'a> {
-    pub id: &'a str,
-    pub latency: &'a str,
-    pub link: Link,
-}
-
-fn format_rtt(rtt: Duration) -> String {
-    let millis = rtt.as_secs_f64() * 1000.0;
-    if millis >= 1000.0 {
-        format!("{:.2} s", millis / 1000.0)
-    } else if millis >= 10.0 {
-        format!("{millis:.0} ms")
-    } else {
-        format!("{millis:.1} ms")
+        view.apply(event);
     }
 }
