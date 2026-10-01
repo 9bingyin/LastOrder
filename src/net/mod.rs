@@ -1,289 +1,332 @@
-use std::{collections::HashMap, time::Duration};
+mod media;
+use media::{receive_media, send_media};
 
-use anyhow::Result;
-use futures_util::StreamExt;
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
+
+use anyhow::{Context, Result, bail};
+use bytes::Bytes;
 use iroh::{
-    Endpoint, EndpointId, SecretKey, address_lookup::PkarrRelayClient, endpoint::presets,
-    protocol::Router,
+    Endpoint, EndpointAddr,
+    endpoint::{Connection, ConnectionError, RecvStream, SendStream},
+    protocol::{AcceptError, ProtocolHandler, Router},
 };
-use iroh_gossip::{
-    Gossip,
-    api::{ApiError, Event, GossipSender},
+use tokio::sync::{Semaphore, broadcast, mpsc, watch};
+use tokio_util::sync::CancellationToken;
+use webrtc::{
+    rtp::packet::Packet,
+    util::marshal::{Marshal, Unmarshal},
 };
-use tokio::sync::{mpsc, watch};
 
-mod discovery;
-mod peer;
+use crate::{
+    app::{DisconnectReason, Handle, NetworkEvent},
+    media::{
+        Hub, MediaPacket,
+        packet::{Reassembler, fragment, generation_bytes},
+    },
+    protocol::{ALPN, MAX_MESSAGE, Room, Wire, random_id},
+};
 
-pub use discovery::generate_network_id;
+pub mod budget;
+pub mod discovery;
 
-/// How this node currently reaches a member.
-///
-/// `Direct` is a selected IP path. `Relay` is a selected relay path.
-/// `Down` means the connection is gone or has no usable path. `Unknown`
-/// is only the state before the first observation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Link {
-    Unknown,
-    Direct,
-    Relay,
-    Down,
+const TIMEOUT: Duration = Duration::from_secs(10);
+
+struct MembershipLease {
+    app: Handle,
+    peer: String,
+    session: String,
+    connection: Connection,
 }
-
-pub enum NetEvent {
-    Ready { endpoint_id: String },
-    Status(String),
-    PeerJoined(String),
-    PeerLeft(String),
-    Link { peer: String, link: Link },
-    Latency { peer: String, rtt: Option<Duration> },
-    Failed(String),
-}
-
-pub struct Session {
-    shutdown: watch::Sender<bool>,
-    task: tokio::task::JoinHandle<()>,
-}
-
-impl Session {
-    pub fn spawn(network_id: String, events: mpsc::UnboundedSender<NetEvent>) -> Self {
-        let (shutdown, notify) = watch::channel(false);
-        let task = tokio::spawn(async move {
-            if let Err(error) = run(network_id, events.clone(), notify).await {
-                let _ = events.send(NetEvent::Failed(error.to_string()));
+impl Drop for MembershipLease {
+    fn drop(&mut self) {
+        let reason = match self.connection.close_reason() {
+            Some(ConnectionError::ApplicationClosed(close))
+                if close.error_code == crate::protocol::ROOM_CLOSED.into() =>
+            {
+                DisconnectReason::RoomClosed
             }
-        });
-        Self { shutdown, task }
-    }
-
-    pub async fn shutdown(self) {
-        let _ = self.shutdown.send(true);
-        let _ = self.task.await;
+            _ => DisconnectReason::ConnectionLost,
+        };
+        self.app
+            .detached(self.peer.clone(), self.session.clone(), reason);
     }
 }
 
-const DISCOVERY_INTERVAL: Duration = Duration::from_secs(3);
+pub struct Transport {
+    pub send: SendStream,
+    pub recv: RecvStream,
+    pub outgoing: mpsc::Receiver<Wire>,
+    pub subscribed: watch::Receiver<Option<String>>,
+    pub publishing: watch::Receiver<Option<String>>,
+}
 
-async fn run(
-    network_id: String,
-    events: mpsc::UnboundedSender<NetEvent>,
-    mut shutdown: watch::Receiver<bool>,
-) -> Result<()> {
-    let endpoint = Endpoint::bind(presets::N0).await?;
-    tokio::select! {
-        biased;
-        result = shutdown.changed() => {
-            result?;
-            endpoint.close().await;
-            return Ok(());
-        }
-        () = endpoint.online() => {}
+pub async fn write_message(send: &mut SendStream, message: &Wire) -> Result<()> {
+    let bytes = serde_json::to_vec(message)?;
+    if bytes.len() > MAX_MESSAGE {
+        bail!("控制消息过大");
     }
-    if *shutdown.borrow() {
-        endpoint.close().await;
-        return Ok(());
-    }
-
-    let endpoint_id = endpoint.id();
-    let _ = events.send(NetEvent::Ready {
-        endpoint_id: endpoint_id.fmt_short().to_string(),
-    });
-
-    let gossip = Gossip::builder().spawn(endpoint.clone());
-    let router = Router::builder(endpoint.clone())
-        .accept(iroh_gossip::ALPN, gossip.clone())
-        .accept(iroh_ping::ALPN, peer::PingReply)
-        .spawn();
-    let topic = discovery::topic_id(&network_id);
-    let (sender, mut receiver) = gossip.subscribe(topic, Vec::new()).await?.split();
-    let relay = discovery::discovery_client(&endpoint)?;
-    let network_key = discovery::network_secret(&network_id);
-    let mut discovery_tick = tokio::time::interval(DISCOVERY_INTERVAL);
-    let mut peers = HashMap::<EndpointId, tokio::task::JoinHandle<()>>::new();
-
-    loop {
-        tokio::select! {
-            biased;
-            result = shutdown.changed() => {
-                result?;
-                break;
-            }
-            _ = discovery_tick.tick() => {
-                discover(
-                    &relay,
-                    &network_key,
-                    endpoint_id,
-                    &sender,
-                    peers.is_empty(),
-                    &events,
-                )
-                .await;
-                if let Err(error) =
-                    discovery::publish_self(&relay, &network_key, endpoint_id).await
-                {
-                    let _ = events.send(NetEvent::Status(format!("发布网络入口失败: {error}")));
-                }
-            }
-            event = receiver.next() => {
-                if !on_gossip(event, endpoint.clone(), &mut peers, &events) {
-                    break;
-                }
-            }
-        }
-    }
-
-    for task in peers.into_values() {
-        task.abort();
-    }
-    router.shutdown().await?;
-    endpoint.close().await;
+    send.write_all(&u32::try_from(bytes.len())?.to_be_bytes())
+        .await?;
+    send.write_all(&bytes).await?;
     Ok(())
 }
 
-async fn discover(
-    relay: &PkarrRelayClient,
-    network_key: &SecretKey,
-    endpoint_id: EndpointId,
-    sender: &GossipSender,
-    no_peers: bool,
-    events: &mpsc::UnboundedSender<NetEvent>,
-) {
-    match discovery::lookup_bootstrap(relay, network_key).await {
-        Ok(Some(peer)) if peer != endpoint_id => {
-            if let Err(error) = sender.join_peers(vec![peer]).await {
-                let _ = events.send(NetEvent::Status(format!("连接失败: {error}")));
-            }
+pub async fn read_message(recv: &mut RecvStream) -> Result<Wire> {
+    let mut length = [0; 4];
+    recv.read_exact(&mut length).await?;
+    let length = usize::try_from(u32::from_be_bytes(length))?;
+    if length == 0 || length > MAX_MESSAGE {
+        bail!("控制消息长度无效");
+    }
+    let mut bytes = vec![0; length];
+    recv.read_exact(&mut bytes).await?;
+    Ok(serde_json::from_slice(&bytes)?)
+}
+
+#[derive(Debug)]
+struct Handler {
+    app: Handle,
+    connections: Semaphore,
+}
+
+impl ProtocolHandler for Handler {
+    async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
+        let Ok(_permit) = self.connections.try_acquire() else {
+            connection.close(0u32.into(), b"connection limit");
+            return Ok(());
+        };
+        let result = accept(self.app.clone(), connection.clone()).await;
+        if connection.close_reason().is_none() {
+            connection.close(0u32.into(), b"session ended");
         }
-        Ok(_) => {
-            if no_peers {
-                let _ = events.send(NetEvent::Status(String::new()));
-            }
-        }
-        Err(error) => {
-            let _ = events.send(NetEvent::Status(format!("查找网络入口失败: {error}")));
-        }
+        result.map_err(|error| AcceptError::from_err(std::io::Error::other(error.to_string())))
     }
 }
 
-fn on_gossip(
-    event: Option<Result<Event, ApiError>>,
-    endpoint: Endpoint,
-    peers: &mut HashMap<EndpointId, tokio::task::JoinHandle<()>>,
-    events: &mpsc::UnboundedSender<NetEvent>,
-) -> bool {
-    match event {
-        Some(Ok(Event::NeighborUp(peer))) => {
-            let label = peer.fmt_short().to_string();
-            let _ = events.send(NetEvent::PeerJoined(label));
-            let restart = peers
-                .get(&peer)
-                .is_none_or(tokio::task::JoinHandle::is_finished);
-            if restart {
-                if let Some(task) = peers.remove(&peer) {
-                    task.abort();
-                }
-                peers.insert(peer, peer::spawn(endpoint, peer, events.clone()));
-            }
-            true
-        }
-        Some(Ok(Event::NeighborDown(peer))) => {
-            let label = peer.fmt_short().to_string();
-            if let Some(task) = peers.remove(&peer) {
-                task.abort();
-            }
-            let _ = events.send(NetEvent::PeerLeft(label));
-            if peers.is_empty() {
-                let _ = events.send(NetEvent::Status(String::new()));
-            }
-            true
-        }
-        Some(Ok(_)) => true,
-        Some(Err(error)) => {
-            let _ = events.send(NetEvent::Status(format!("网络事件失败: {error}")));
-            true
-        }
-        None => false,
-    }
+pub fn router(endpoint: &Endpoint, app: Handle) -> Router {
+    Router::builder(endpoint.clone())
+        .accept(
+            ALPN,
+            Handler {
+                app,
+                connections: Semaphore::new(16),
+            },
+        )
+        .spawn()
 }
 
-#[cfg(test)]
-mod tests {
-    use anyhow::{Result, anyhow};
-    use tokio::sync::mpsc;
-
-    use super::{Link, NetEvent, Session, generate_network_id};
-
-    #[tokio::test]
-    async fn same_network_id_discovers_a_peer() -> Result<()> {
-        let network_id = generate_network_id()?;
-        let (tx_a, mut rx_a) = mpsc::unbounded_channel();
-        let (tx_b, mut rx_b) = mpsc::unbounded_channel();
-        let session_a = Session::spawn(network_id.clone(), tx_a);
-        let session_b = Session::spawn(network_id, tx_b);
-        let mut notes = Vec::new();
-
-        let discovered = tokio::time::timeout(std::time::Duration::from_secs(45), async {
-            let mut joined = [false, false];
-            let mut measured = [false, false];
-            let mut linked = [false, false];
-            loop {
-                tokio::select! {
-                    event = rx_a.recv() => {
-                        note_event(
-                            event,
-                            &mut notes,
-                            &mut joined[0],
-                            &mut measured[0],
-                            &mut linked[0],
-                        )?;
-                    }
-                    event = rx_b.recv() => {
-                        note_event(
-                            event,
-                            &mut notes,
-                            &mut joined[1],
-                            &mut measured[1],
-                            &mut linked[1],
-                        )?;
-                    }
-                }
-                if joined == [true, true] && measured == [true, true] && linked == [true, true] {
-                    return Ok(());
-                }
-            }
-        })
+async fn accept(app: Handle, connection: Connection) -> Result<()> {
+    let (mut send, mut recv) = tokio::time::timeout(TIMEOUT, connection.accept_bi()).await??;
+    let hello = tokio::time::timeout(TIMEOUT, read_message(&mut recv)).await??;
+    let session = random_id()?;
+    let _membership = MembershipLease {
+        app: app.clone(),
+        peer: connection.remote_id().to_string(),
+        session: session.clone(),
+        connection: connection.clone(),
+    };
+    let (tx, rx) = mpsc::channel(32);
+    let (subscription, subscribed) = watch::channel(None);
+    let (publishing, published) = watch::channel(None);
+    let attached = app
+        .attach(
+            connection.clone(),
+            session.clone(),
+            hello,
+            tx,
+            subscription,
+            publishing,
+        )
         .await;
-
-        session_a.shutdown().await;
-        session_b.shutdown().await;
-
-        match discovered {
-            Ok(result) => result,
-            Err(_) => Err(anyhow!(
-                "peers with the same network id did not find each other, report latency, or classify the path: {}",
-                notes.join(" | ")
-            )),
+    let room = match attached {
+        Ok(room) => room,
+        Err(error) => {
+            tokio::time::timeout(
+                TIMEOUT,
+                write_message(
+                    &mut send,
+                    &Wire::Error {
+                        message: error.to_string(),
+                    },
+                ),
+            )
+            .await??;
+            send.finish()?;
+            let _ = tokio::time::timeout(Duration::from_secs(1), send.stopped()).await;
+            return Ok(());
         }
+    };
+    tokio::time::timeout(TIMEOUT, write_message(&mut send, &Wire::Snapshot { room })).await??;
+    serve(
+        app,
+        connection,
+        session,
+        Transport {
+            send,
+            recv,
+            outgoing: rx,
+            subscribed,
+            publishing: published,
+        },
+        true,
+    )
+    .await;
+    Ok(())
+}
+
+pub struct Joined {
+    pub connection: Connection,
+    pub session: String,
+    pub room: Room,
+    pub sender: mpsc::Sender<Wire>,
+    pub subscription: watch::Sender<Option<String>>,
+    pub publishing: watch::Sender<Option<String>>,
+    pub transport: Transport,
+}
+
+pub async fn join(
+    endpoint: &Endpoint,
+    code: &crate::protocol::RoomCode,
+    address: EndpointAddr,
+    name: String,
+) -> Result<Joined> {
+    tokio::time::timeout(Duration::from_secs(25), async {
+        let connection = endpoint.connect(address, ALPN).await?;
+        let result = async {
+            if connection.max_datagram_size().is_none() {
+                bail!("对端不支持实时媒体 Datagram");
+            }
+            let (mut send, mut recv) = connection.open_bi().await?;
+            write_message(
+                &mut send,
+                &Wire::Join {
+                    version: 3,
+                    room_id: code.id(),
+                    capability: code.capability(),
+                    name,
+                },
+            )
+            .await?;
+            let room = match read_message(&mut recv).await? {
+                Wire::Snapshot { room }
+                    if room.id == code.id()
+                        && room.owner_id == connection.remote_id().to_string() =>
+                {
+                    room
+                }
+                Wire::Error { message } => bail!("{message}"),
+                _ => bail!("房间握手响应无效"),
+            };
+            let (sender, outgoing) = mpsc::channel(32);
+            let (subscription, subscribed) = watch::channel(None);
+            let (publishing, published) = watch::channel(None);
+            Ok(Joined {
+                connection: connection.clone(),
+                session: random_id()?,
+                room,
+                sender,
+                subscription,
+                publishing,
+                transport: Transport {
+                    send,
+                    recv,
+                    outgoing,
+                    subscribed,
+                    publishing: published,
+                },
+            })
+        }
+        .await;
+        if result.is_err() {
+            connection.close(0u32.into(), b"join rejected");
+        }
+        result
+    })
+    .await
+    .context("加入房间超时")?
+}
+
+async fn receive_control(
+    app: &Handle,
+    peer: &str,
+    session: &str,
+    recv: &mut RecvStream,
+) -> Result<()> {
+    loop {
+        let message = read_message(recv).await?;
+        app.network(NetworkEvent::Message {
+            peer: peer.into(),
+            session: session.into(),
+            message,
+        })
+        .await?;
     }
+}
 
-    fn note_event(
-        event: Option<NetEvent>,
-        notes: &mut Vec<String>,
-        joined: &mut bool,
-        measured: &mut bool,
-        linked: &mut bool,
-    ) -> Result<()> {
-        match event {
-            Some(NetEvent::PeerJoined(_)) => *joined = true,
-            Some(NetEvent::Latency { rtt: Some(_), .. }) => *measured = true,
-            Some(NetEvent::Link {
-                link: Link::Direct | Link::Relay,
-                ..
-            }) => *linked = true,
-            Some(NetEvent::Status(status) | NetEvent::Failed(status)) => notes.push(status),
-            Some(_) => {}
-            None => return Err(anyhow!("network session closed")),
+pub async fn serve(
+    app: Handle,
+    connection: Connection,
+    session: String,
+    transport: Transport,
+    owner_side: bool,
+) {
+    let Transport {
+        mut send,
+        mut recv,
+        mut outgoing,
+        subscribed,
+        publishing,
+    } = transport;
+    let (mut sending, mut receiving) = if owner_side {
+        (subscribed, publishing)
+    } else {
+        (publishing, subscribed)
+    };
+    let peer = connection.remote_id().to_string();
+    let _membership = MembershipLease {
+        app: app.clone(),
+        peer: peer.clone(),
+        session: session.clone(),
+        connection: connection.clone(),
+    };
+    let hub = app.hub.clone();
+    let reader = receive_control(&app, &peer, &session, &mut recv);
+    let writer = async {
+        while let Some(message) = outgoing.recv().await {
+            tokio::time::timeout(TIMEOUT, write_message(&mut send, &message)).await??;
         }
-        Ok(())
+        Ok::<(), anyhow::Error>(())
+    };
+    let sender = send_media(
+        connection.clone(),
+        hub.clone(),
+        &mut sending,
+        app.shutdown.clone(),
+        peer.clone(),
+        session.clone(),
+    );
+    let receiver = receive_media(
+        connection.clone(),
+        hub,
+        &mut receiving,
+        app.shutdown.clone(),
+    );
+    tokio::select! {
+        _ = app.shutdown.cancelled() => {},
+        result = reader => { if let Err(error) = result { tracing::debug!(%error, %peer, "控制读取结束"); } },
+        result = writer => { if let Err(error) = result { tracing::debug!(%error, %peer, "控制发送结束"); } },
+        result = sender => { if let Err(error) = result { tracing::debug!(%error, %peer, "媒体发送结束"); } },
+        result = receiver => { if let Err(error) = result { tracing::debug!(%error, %peer, "媒体接收结束"); } },
+    }
+    let code = if owner_side && app.shutdown.is_cancelled() {
+        crate::protocol::ROOM_CLOSED
+    } else {
+        0
+    };
+    if connection.close_reason().is_none() {
+        connection.close(code.into(), b"session ended");
     }
 }

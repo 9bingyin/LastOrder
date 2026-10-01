@@ -1,203 +1,200 @@
-use std::collections::BTreeMap;
+mod actor;
+mod budget;
+mod diagnostics;
+mod handle;
+mod lifecycle;
+mod network;
+mod operations;
 
-use anyhow::Result;
-use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
-use futures_util::StreamExt;
-use ratatui::DefaultTerminal;
-use tokio::sync::mpsc;
-
-use crate::{
-    net::{self, NetEvent, Session},
-    ui,
+use std::{
+    collections::{HashMap, VecDeque},
+    sync::Arc,
+    time::{Duration, Instant},
 };
 
-use self::view::{NetworkView, Screen};
+use anyhow::{Context, Result, bail};
+use iroh::{Endpoint, endpoint::Connection};
+use serde_json::{Value, json};
+use tokio::sync::{mpsc, oneshot, watch};
+use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
-mod view;
+use crate::{
+    media::{Hub, MediaEvent, Peer},
+    net::{self, discovery::Discovery},
+    protocol::{
+        JoinTarget, LinkInfo, LocalMedia, MAX_MEMBERS, Member, QualityMode, Room, RoomCode,
+        RoomTicket, Share, ShareState, Snapshot, VideoProfile, Wire, random_id, secret_matches,
+        validate_name,
+    },
+};
 
-pub(crate) use view::{PeerRow, ScreenView};
+#[derive(Debug)]
+pub struct Fault {
+    pub code: &'static str,
+    pub message: String,
+    pub status: u16,
+}
+impl std::fmt::Display for Fault {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+impl std::error::Error for Fault {}
+#[cfg(test)]
+mod tests;
 
-const NETWORK_ID_LIMIT: usize = 128;
+fn fault(code: &'static str, message: &str, status: u16) -> anyhow::Error {
+    Fault {
+        code,
+        message: message.into(),
+        status,
+    }
+    .into()
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub enum Operation {
+    Create {
+        name: String,
+    },
+    Join {
+        code: String,
+        name: String,
+    },
+    Leave,
+    StartShare {
+        profile: VideoProfile,
+        audio: bool,
+    },
+    UpdateShare {
+        id: String,
+        profile: VideoProfile,
+    },
+    StopShare {
+        id: String,
+    },
+    Subscribe {
+        share_id: String,
+        generation: String,
+    },
+    Unsubscribe {
+        id: String,
+    },
+    Answer {
+        peer_id: String,
+        sdp: String,
+    },
+    Playing {
+        id: String,
+    },
+    ReleaseClient,
+}
+
+#[derive(Clone, Copy)]
+pub enum DisconnectReason {
+    RoomClosed,
+    ConnectionLost,
+}
+
+pub enum NetworkEvent {
+    Message {
+        peer: String,
+        session: String,
+        message: Wire,
+    },
+    Detached {
+        peer: String,
+        session: String,
+        reason: DisconnectReason,
+    },
+}
 
 enum Command {
-    None,
-    Quit,
-    Leave,
+    Local {
+        client: String,
+        operation: Operation,
+        cancellation: CancellationToken,
+        idempotency_key: Option<String>,
+        reply: oneshot::Sender<Result<Value>>,
+    },
+    Attach {
+        connection: Connection,
+        session: String,
+        hello: Wire,
+        sender: mpsc::Sender<Wire>,
+        subscription: watch::Sender<Option<String>>,
+        publishing: watch::Sender<Option<String>>,
+        reply: oneshot::Sender<Result<Room>>,
+    },
+    Network(NetworkEvent),
+    Diagnostics {
+        reply: oneshot::Sender<Value>,
+    },
 }
 
-pub struct App {
-    screen: Screen,
-    session: Option<Session>,
-    events: Option<mpsc::UnboundedReceiver<NetEvent>>,
+#[derive(Clone)]
+pub struct Handle {
+    commands: mpsc::Sender<Command>,
+    pub snapshots: watch::Receiver<Snapshot>,
+    pub hub: Arc<Hub>,
+    pub shutdown: CancellationToken,
+    tasks: TaskTracker,
 }
-
-pub async fn run(terminal: &mut DefaultTerminal) -> Result<()> {
-    let mut app = App {
-        screen: Screen::Join {
-            input: String::new(),
-            error: None,
-        },
-        session: None,
-        events: None,
-    };
-    let mut input = EventStream::new();
-    let result = loop {
-        if let Err(error) = terminal.draw(|frame| ui::draw(frame, &app)) {
-            break Err(error.into());
-        }
-        tokio::select! {
-            biased;
-            event = input.next() => {
-                let Some(event) = event else {
-                    break Ok(());
-                };
-                match app.on_event(event?)? {
-                    Command::Quit => break Ok(()),
-                    Command::Leave => app.leave().await,
-                    Command::None => {}
-                }
-            }
-            event = recv_net(&mut app.events) => {
-                if let Some(event) = event {
-                    app.on_net(event);
-                }
-            }
-        }
-    };
-    if let Some(session) = app.session.take() {
-        session.shutdown().await;
-    }
-    result
-}
-
-async fn recv_net(events: &mut Option<mpsc::UnboundedReceiver<NetEvent>>) -> Option<NetEvent> {
-    match events {
-        Some(events) => events.recv().await,
-        None => std::future::pending().await,
+impl std::fmt::Debug for Handle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Handle").finish_non_exhaustive()
     }
 }
 
-impl App {
-    pub(crate) fn screen_kind(&self) -> ScreenView<'_> {
-        view::screen_view(&self.screen)
+struct RemotePeer {
+    connection: Connection,
+    session: String,
+    sender: mpsc::Sender<Wire>,
+    subscription: watch::Sender<Option<String>>,
+    subscription_id: Option<String>,
+    publishing: watch::Sender<Option<String>>,
+    budget: Option<LinkBudget>,
+}
+struct LinkBudget {
+    generation: String,
+    bitrate: u32,
+    updated: Instant,
+}
+impl LinkBudget {
+    fn current(&self, generation: &str) -> Option<u32> {
+        (self.generation == generation && self.updated.elapsed() < Duration::from_secs(3))
+            .then_some(self.bitrate)
     }
+}
+struct LocalPeer {
+    peer: Peer,
+    client: String,
+    deadline: Option<Instant>,
+}
+struct Receipt {
+    client: String,
+    key: String,
+    operation: Operation,
+    value: Value,
+    created: Instant,
+}
 
-    fn on_event(&mut self, event: Event) -> Result<Command> {
-        let Event::Key(key) = event else {
-            return Ok(Command::None);
-        };
-        if key.kind == KeyEventKind::Release {
-            return Ok(Command::None);
-        }
-        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-            return Ok(Command::Quit);
-        }
-        match key.code {
-            KeyCode::Esc if self.is_network() => Ok(Command::Leave),
-            KeyCode::Esc => Ok(Command::Quit),
-            _ if self.is_network() => Ok(Command::None),
-            KeyCode::Enter => self.join_from_input(),
-            KeyCode::Char('g') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.generate();
-                Ok(Command::None)
-            }
-            KeyCode::F(2) => {
-                self.generate();
-                Ok(Command::None)
-            }
-            KeyCode::Backspace => {
-                self.edit_input(|input| {
-                    input.pop();
-                });
-                Ok(Command::None)
-            }
-            KeyCode::Char(character)
-                if !key.modifiers.contains(KeyModifiers::CONTROL)
-                    && !key.modifiers.contains(KeyModifiers::ALT) =>
-            {
-                self.edit_input(|input| {
-                    if input.chars().count() < NETWORK_ID_LIMIT {
-                        input.push(character);
-                    }
-                });
-                Ok(Command::None)
-            }
-            _ => Ok(Command::None),
-        }
-    }
-
-    fn is_network(&self) -> bool {
-        matches!(self.screen, Screen::Network(_))
-    }
-
-    fn join_from_input(&mut self) -> Result<Command> {
-        let network_id = {
-            let Screen::Join { input, error } = &mut self.screen else {
-                return Ok(Command::None);
-            };
-            let network_id = input.trim().to_string();
-            if network_id.is_empty() {
-                *error = Some("请输入或生成网络 ID".to_string());
-                return Ok(Command::None);
-            }
-            network_id
-        };
-        self.join(network_id);
-        Ok(Command::None)
-    }
-
-    fn generate(&mut self) {
-        let Screen::Join { input, error } = &mut self.screen else {
-            return;
-        };
-        match net::generate_network_id() {
-            Ok(network_id) => {
-                *input = network_id;
-                *error = None;
-            }
-            Err(cause) => *error = Some(cause.to_string()),
-        }
-    }
-
-    fn join(&mut self, network_id: String) {
-        let (sender, receiver) = mpsc::unbounded_channel();
-        self.session = Some(Session::spawn(network_id.clone(), sender));
-        self.events = Some(receiver);
-        self.screen = Screen::Network(NetworkView {
-            network_id,
-            endpoint_id: String::new(),
-            peers: BTreeMap::new(),
-            status: String::new(),
-        });
-    }
-
-    async fn leave(&mut self) {
-        let network_id = match &self.screen {
-            Screen::Network(view) => view.network_id.clone(),
-            Screen::Join { .. } => return,
-        };
-        if let Some(session) = self.session.take() {
-            session.shutdown().await;
-        }
-        self.events = None;
-        self.screen = Screen::Join {
-            input: network_id,
-            error: None,
-        };
-    }
-
-    fn edit_input(&mut self, edit: impl FnOnce(&mut String)) {
-        let Screen::Join { input, error } = &mut self.screen else {
-            return;
-        };
-        edit(input);
-        *error = None;
-    }
-
-    fn on_net(&mut self, event: NetEvent) {
-        let Screen::Network(view) = &mut self.screen else {
-            return;
-        };
-        view.apply(event);
-    }
+struct Actor {
+    endpoint: Endpoint,
+    state: Snapshot,
+    code: Option<RoomCode>,
+    discovery: Discovery,
+    publisher: Option<CancellationToken>,
+    peers: HashMap<String, RemotePeer>,
+    upstream: Option<RemotePeer>,
+    rtc: HashMap<String, LocalPeer>,
+    share_deadline: Option<Instant>,
+    downstream_budget: Option<LinkBudget>,
+    last_budget_sent: Option<LinkBudget>,
+    receipts: VecDeque<Receipt>,
+    snapshots: watch::Sender<Snapshot>,
+    hub: Arc<Hub>,
+    tasks: TaskTracker,
+    shutdown: CancellationToken,
+    handle: Handle,
 }

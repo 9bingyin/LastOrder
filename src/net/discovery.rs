@@ -1,114 +1,110 @@
-use std::str::FromStr;
+use std::{str::FromStr, time::Duration};
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result};
 use iroh::{
-    Endpoint, EndpointId, SecretKey,
+    Endpoint, EndpointAddr,
     address_lookup::{EndpointInfo, N0_DNS_PKARR_RELAY_PROD, PkarrRelayClient, UserData},
 };
-use iroh_gossip::TopicId;
+use tokio_util::sync::CancellationToken;
 use url::Url;
 
-pub(super) fn discovery_client(endpoint: &Endpoint) -> Result<PkarrRelayClient> {
-    let relay_url = Url::parse(N0_DNS_PKARR_RELAY_PROD).context("invalid discovery relay url")?;
-    Ok(PkarrRelayClient::new(
-        relay_url,
-        endpoint.tls_config().clone(),
-        endpoint.dns_resolver()?.clone(),
-    ))
+use crate::protocol::RoomCode;
+
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
+
+#[derive(Clone)]
+pub enum Discovery {
+    Public(PkarrRelayClient),
+    #[cfg(test)]
+    Memory(std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, EndpointAddr>>>),
 }
 
-pub(super) async fn publish_self(
-    relay: &PkarrRelayClient,
-    network_key: &SecretKey,
-    endpoint_id: EndpointId,
-) -> Result<()> {
-    let user_data = UserData::from_str(&endpoint_id.to_z32())
-        .map_err(|error| anyhow!("endpoint id does not fit discovery record: {error}"))?;
-    let info = EndpointInfo::new(network_key.public()).with_user_data(Some(user_data));
-    let packet = info
-        .to_pkarr_signed_packet(network_key, 30)
-        .map_err(|error| anyhow!("failed to encode discovery record: {error}"))?;
-    relay.publish(&packet).await?;
-    Ok(())
-}
-
-pub(super) async fn lookup_bootstrap(
-    relay: &PkarrRelayClient,
-    network_key: &SecretKey,
-) -> Result<Option<EndpointId>> {
-    let packet = match relay.resolve(network_key.public()).await {
-        Ok(packet) => packet,
-        Err(error) => {
-            if error.to_string().contains("404") {
-                return Ok(None);
-            }
-            return Err(error.into());
-        }
-    };
-    let info = EndpointInfo::from_pkarr_signed_packet(&packet)
-        .map_err(|error| anyhow!("failed to decode discovery record: {error}"))?;
-    let Some(user_data) = info.user_data() else {
-        return Ok(None);
-    };
-    let endpoint_id = EndpointId::from_z32(user_data.as_ref())
-        .map_err(|error| anyhow!("invalid endpoint id in discovery record: {error}"))?;
-    Ok(Some(endpoint_id))
-}
-
-pub(super) fn topic_id(network_id: &str) -> TopicId {
-    TopicId::from_bytes(blake3::derive_key(
-        "lastorder.topic.v1",
-        network_id.as_bytes(),
-    ))
-}
-
-pub(super) fn network_secret(network_id: &str) -> SecretKey {
-    SecretKey::from_bytes(&blake3::derive_key(
-        "lastorder.network.v1",
-        network_id.as_bytes(),
-    ))
-}
-
-pub fn generate_network_id() -> Result<String> {
-    let mut bytes = [0u8; 16];
-    getrandom::fill(&mut bytes).context("failed to generate network id")?;
-    let hex: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
-    let mut network_id = String::with_capacity(hex.len() + hex.len() / 4);
-    for (index, character) in hex.chars().enumerate() {
-        if index > 0 && index.is_multiple_of(4) {
-            network_id.push('-');
-        }
-        network_id.push(character);
+impl Discovery {
+    pub fn public(endpoint: &Endpoint) -> Result<Self> {
+        Ok(Self::Public(PkarrRelayClient::new(
+            Url::parse(N0_DNS_PKARR_RELAY_PROD)?,
+            endpoint.tls_config().clone(),
+            endpoint.dns_resolver()?.clone(),
+        )))
     }
-    Ok(network_id)
-}
 
-#[cfg(test)]
-mod tests {
-    use anyhow::Result;
-
-    use super::{generate_network_id, network_secret, topic_id};
-
-    #[test]
-    fn generated_network_id_is_grouped_hex() -> Result<()> {
-        let network_id = generate_network_id()?;
-        let parts: Vec<_> = network_id.split('-').collect();
-        assert_eq!(parts.len(), 8);
-        assert!(parts.iter().all(|part| part.len() == 4));
+    pub async fn publish(&self, code: &RoomCode, endpoint: &Endpoint) -> Result<()> {
+        match self {
+            Self::Public(client) => {
+                let key = code.discovery_key();
+                let data =
+                    UserData::from_str(&endpoint.id().to_z32()).context("编码房间入口失败")?;
+                let info = EndpointInfo::from_parts(key.public(), endpoint.addr().into())
+                    .with_user_data(Some(data));
+                let packet = info
+                    .to_pkarr_signed_packet(&key, 120)
+                    .context("签名房间入口失败")?;
+                tokio::time::timeout(REQUEST_TIMEOUT, client.publish(&packet))
+                    .await
+                    .context("发布房间入口超时")??;
+            }
+            #[cfg(test)]
+            Self::Memory(records) => {
+                records
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("测试发现状态不可用"))?
+                    .insert(code.id(), endpoint.addr());
+            }
+        }
         Ok(())
     }
 
-    #[test]
-    fn network_id_derivation_is_stable() {
-        assert_eq!(topic_id("alpha"), topic_id("alpha"));
-        assert_ne!(topic_id("alpha"), topic_id("beta"));
-        assert_eq!(
-            network_secret("alpha").public(),
-            network_secret("alpha").public()
-        );
-        assert_ne!(
-            network_secret("alpha").public(),
-            network_secret("beta").public()
-        );
+    pub async fn resolve(&self, code: &RoomCode) -> Result<EndpointAddr> {
+        match self {
+            Self::Public(client) => {
+                let packet = tokio::time::timeout(
+                    REQUEST_TIMEOUT,
+                    client.resolve(code.discovery_key().public()),
+                )
+                .await
+                .context("查找房间入口超时")??;
+                let info =
+                    EndpointInfo::from_pkarr_signed_packet(&packet).context("房间入口无效")?;
+                let data = info.user_data().context("房间入口不存在")?;
+                let id = iroh::EndpointId::from_z32(data.as_ref()).context("房主节点标识无效")?;
+                Ok(EndpointAddr::from(id).with_addrs(info.addrs().cloned()))
+            }
+            #[cfg(test)]
+            Self::Memory(records) => records
+                .lock()
+                .map_err(|_| anyhow::anyhow!("测试发现状态不可用"))?
+                .get(&code.id())
+                .cloned()
+                .context("房间入口不存在"),
+        }
+    }
+
+    pub async fn refresh(self, code: RoomCode, endpoint: Endpoint, cancel: CancellationToken) {
+        let mut interval = tokio::time::interval(Duration::from_secs(30));
+        interval.tick().await;
+        loop {
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => break,
+                _ = interval.tick() => {
+                    tokio::select! {
+                        biased;
+                        _ = cancel.cancelled() => break,
+                        result = self.publish(&code, &endpoint) => {
+                            if let Err(error) = result { tracing::warn!(%error, "刷新房间入口失败"); }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub fn forget(&self, code: &RoomCode) {
+        if let Self::Memory(records) = self
+            && let Ok(mut records) = records.lock()
+        {
+            records.remove(&code.id());
+        }
     }
 }

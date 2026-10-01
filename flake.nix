@@ -39,6 +39,7 @@
               clippy
               rustfmt
               rust-analyzer
+              bun
               config.treefmt.build.wrapper
             ];
             env.RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";

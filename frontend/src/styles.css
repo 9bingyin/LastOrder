@@ -1,0 +1,18 @@
+@import "@cloudflare/kumo/styles/tailwind";
+@import "tailwindcss";
+@source "../node_modules/@cloudflare/kumo/dist/**/*.{js,jsx,ts,tsx}";
+
+:root {
+  font-family: system-ui, sans-serif;
+  font-size: 16px;
+}
+
+body {
+  margin: 0;
+  font-size: 14px;
+}
+
+button,
+input {
+  font: inherit;
+}

@@ -1,3 +1,6 @@
 .direnv/
 /target/
+/frontend/node_modules/
+/frontend/dist/
+/frontend/*.tsbuildinfo
 result
