@@ -58,12 +58,9 @@ async fn http_access_requires_credentials_and_exact_local_origin() -> Result<()>
     let state = WebState::new(app, "test-token".into(), port);
     let server_shutdown = shutdown.clone();
     let server = tokio::spawn(async move {
-        axum::serve(
-            listener,
-            router(state, PathBuf::from("missing-test-assets")),
-        )
-        .with_graceful_shutdown(server_shutdown.cancelled_owned())
-        .await
+        axum::serve(listener, router(state, None))
+            .with_graceful_shutdown(server_shutdown.cancelled_owned())
+            .await
     });
     let result: Result<()> = async {
         let host = format!("Host: 127.0.0.1:{port}\r\n");

@@ -38,3 +38,4 @@ webrtc = "0.14.0"
 uuid = { version = "1.26", features = ["v4"] }
 url = "2.5.8"
 webbrowser = "1.0"
+rust-embed = { version = "8.12.0", features = ["mime-guess"] }

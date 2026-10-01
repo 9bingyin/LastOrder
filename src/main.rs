@@ -29,8 +29,8 @@ struct Args {
         help = "localhost HTTP 端口，0 表示自动选择"
     )]
     port: u16,
-    #[arg(long, default_value = "frontend/dist", help = "Bun 构建后的前端目录")]
-    frontend_dir: PathBuf,
+    #[arg(long, help = "自定义前端静态文件目录（默认使用编译内置的前端）")]
+    frontend_dir: Option<PathBuf>,
     #[arg(long, help = "不自动打开浏览器")]
     no_open: bool,
 }
@@ -43,10 +43,10 @@ async fn main() -> Result<()> {
         )
         .init();
     let args = Args::parse();
-    if !args.frontend_dir.join("index.html").is_file() {
-        anyhow::bail!(
-            "前端尚未构建。请先执行：cd frontend && bun install && bun run build；或使用 --frontend-dir 指定构建目录"
-        );
+    if let Some(ref dir) = args.frontend_dir
+        && !dir.join("index.html").is_file()
+    {
+        anyhow::bail!("指定的前端目录中不存在 index.html: {}", dir.display());
     }
     let listener = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, args.port))
         .await
