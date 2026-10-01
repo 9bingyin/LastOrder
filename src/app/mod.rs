@@ -22,9 +22,8 @@ use crate::{
     media::{Hub, MediaEvent, Peer},
     net::{self, discovery::Discovery},
     protocol::{
-        JoinTarget, LinkInfo, LocalMedia, MAX_MEMBERS, Member, QualityMode, Room, RoomCode,
-        RoomTicket, Share, ShareState, Snapshot, VideoProfile, Wire, random_id, secret_matches,
-        validate_name,
+        JoinTarget, LinkInfo, LocalMedia, Member, QualityMode, Room, RoomCode, RoomTicket, Share,
+        ShareState, Snapshot, VideoProfile, Wire, random_id, secret_matches, validate_name,
     },
 };
 

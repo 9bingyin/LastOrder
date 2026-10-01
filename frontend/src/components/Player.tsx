@@ -1,6 +1,5 @@
 import { Surface } from "@cloudflare/kumo/components/surface";
 import { Button } from "@cloudflare/kumo/components/button";
-import { Checkbox } from "@cloudflare/kumo/components/checkbox";
 import { Dialog } from "@cloudflare/kumo/components/dialog";
 import {
   AppWindowIcon,
@@ -41,8 +40,6 @@ export function Player({ session }: { session: SessionState }) {
     perform,
     resumePlayback,
     receiveStats,
-    shareAudio,
-    setShareAudio,
     available,
     ownCapture,
     media,
@@ -385,14 +382,6 @@ export function Player({ session }: { session: SessionState }) {
             </div>
           )}
           <div className="flex flex-wrap items-center gap-2">
-            {!room.share && !snapshot?.capture && (
-              <Checkbox
-                label="共享音频"
-                checked={shareAudio}
-                onCheckedChange={setShareAudio}
-                disabled={!available}
-              />
-            )}
             {ownCapture && captureStream && (
               <Dialog.Trigger
                 render={

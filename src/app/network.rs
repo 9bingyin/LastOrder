@@ -41,9 +41,6 @@ impl Actor {
             self.end_share().await;
         }
         let room = self.state.room.as_mut().context("房间不存在")?;
-        if room.members.len() >= MAX_MEMBERS && !room.members.contains_key(&id) {
-            bail!("房间人数已满（最多 5 人）");
-        }
         room.members.insert(
             id.clone(),
             Member {

@@ -92,7 +92,6 @@ it.each(["picker", "create", "connect"] as const)(
       "test-token",
       "page",
       defaultProfile,
-      true,
       () => {},
     );
     await entered.promise;
@@ -217,7 +216,6 @@ it("画质请求失败时恢复已应用参数，队列仍可继续", async () =
     "test-token",
     "page",
     defaultProfile,
-    true,
     () => {},
   );
   fetchSpy.mockResolvedValueOnce(
@@ -296,7 +294,6 @@ it("当前轨道结束会停止分享，旧轨道迟到事件不能停止新捕�
     "test-token",
     "page",
     defaultProfile,
-    false,
     onEnded,
   );
   await owner.stopCapture("test-token", "page");
@@ -304,7 +301,6 @@ it("当前轨道结束会停止分享，旧轨道迟到事件不能停止新捕�
     "test-token",
     "page",
     defaultProfile,
-    false,
     onEnded,
   );
   old.track.dispatchEvent(new Event("ended"));

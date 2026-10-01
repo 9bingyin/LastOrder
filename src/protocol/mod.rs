@@ -10,7 +10,6 @@ use uuid::{Uuid, Variant, Version};
 
 pub const ALPN: &[u8] = b"lastorder/3";
 pub const ROOM_CLOSED: u32 = 1;
-pub const MAX_MEMBERS: usize = 5;
 pub const MAX_MESSAGE: usize = 64 * 1024;
 pub const MAX_JOIN_INPUT: usize = 4096;
 

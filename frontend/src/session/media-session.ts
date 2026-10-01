@@ -116,7 +116,6 @@ export class MediaSession {
     token: string,
     clientId: string,
     profile: VideoProfile,
-    audio: boolean,
     onEnded: () => void,
   ) {
     if (!navigator.mediaDevices?.getDisplayMedia)
@@ -124,7 +123,7 @@ export class MediaSession {
     const epoch = ++this.captureEpoch;
     const valid = () => this.captureEpoch === epoch;
     const stream = await navigator.mediaDevices.getDisplayMedia(
-      displayOptions(profile, audio),
+      displayOptions(profile),
     );
     let resource: CaptureResource | null = null;
     const stopTracks = () =>

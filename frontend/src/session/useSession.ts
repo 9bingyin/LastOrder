@@ -36,7 +36,6 @@ export function useSession() {
   const [bitrate, setBitrate] = useState(
     String(defaultProfile.bitrate / 1_000_000),
   );
-  const [shareAudio, setShareAudio] = useState(true);
   const [qualityOpen, setQualityOpen] = useState(false);
   const [qualityError, setQualityError] = useState<string | null>(null);
   const [receiveStats, setReceiveStats] = useState<ViewerStats | null>(null);
@@ -291,7 +290,6 @@ export function useSession() {
       auth.token,
       auth.clientId,
       appliedProfile.current,
-      shareAudio,
       () => {
         void perform(stopCapture);
       },
@@ -353,8 +351,6 @@ export function useSession() {
     setFps,
     bitrate,
     setBitrate,
-    shareAudio,
-    setShareAudio,
     qualityOpen,
     setQualityOpen,
     qualityError,

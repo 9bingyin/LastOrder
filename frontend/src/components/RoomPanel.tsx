@@ -24,7 +24,7 @@ export function RoomPanel({ session }: { session: SessionState }) {
           <div className="flex flex-wrap items-center gap-3 text-sm text-kumo-subtle">
             <span className="flex items-center gap-1.5">
               <UsersIcon size={16} />
-              {Object.keys(room.members).length} / 5 人
+              {Object.keys(room.members).length} 人
             </span>
           </div>
         </div>

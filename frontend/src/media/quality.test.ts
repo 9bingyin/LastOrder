@@ -60,7 +60,7 @@ describe("共享画质与音频", () => {
   });
 
   it("请求共享声音并关闭语音处理", () => {
-    expect(displayOptions(defaultProfile, true)).toMatchObject({
+    expect(displayOptions(defaultProfile)).toMatchObject({
       systemAudio: "include",
       windowAudio: "window",
       audio: {
@@ -69,10 +69,6 @@ describe("共享画质与音频", () => {
         autoGainControl: false,
         channelCount: { ideal: 2 },
       },
-    });
-    expect(displayOptions(defaultProfile, false)).toMatchObject({
-      audio: false,
-      systemAudio: "exclude",
     });
   });
 

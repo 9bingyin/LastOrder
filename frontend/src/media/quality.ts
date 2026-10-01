@@ -31,18 +31,16 @@ export function videoConstraints(profile: VideoProfile): MediaTrackConstraints {
   };
 }
 
-export function displayOptions(profile: VideoProfile, audio: boolean) {
+export function displayOptions(profile: VideoProfile) {
   return {
     video: videoConstraints(profile),
-    audio: audio
-      ? {
-          echoCancellation: false,
-          noiseSuppression: false,
-          autoGainControl: false,
-          channelCount: { ideal: 2 },
-        }
-      : false,
-    systemAudio: audio ? "include" : "exclude",
+    audio: {
+      echoCancellation: false,
+      noiseSuppression: false,
+      autoGainControl: false,
+      channelCount: { ideal: 2 },
+    },
+    systemAudio: "include",
     windowAudio: "window",
   } satisfies DisplayMediaStreamOptions & {
     systemAudio: "include" | "exclude";
