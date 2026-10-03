@@ -55,6 +55,15 @@ impl Actor {
         if snapshot.join_ticket.is_some() {
             snapshot.join_ticket = Some("[redacted]".into());
         }
+        snapshot.files.retain(|_, file| {
+            file.publisher_id == snapshot.endpoint_id || file.recipient_id == snapshot.endpoint_id
+        });
+        for file in snapshot.files.values_mut() {
+            file.room_id = "[redacted]".into();
+            if file.blob_ticket.is_some() {
+                file.blob_ticket = Some("[redacted]".into());
+            }
+        }
         json!({
             "version": env!("CARGO_PKG_VERSION"),
             "snapshot": snapshot,

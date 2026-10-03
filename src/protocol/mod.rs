@@ -8,7 +8,8 @@ use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
 use uuid::{Uuid, Variant, Version};
 
-pub const ALPN: &[u8] = b"lastorder/3";
+pub const ALPN: &[u8] = b"lastorder/5";
+pub const VERSION: u8 = 5;
 pub const ROOM_CLOSED: u32 = 1;
 pub const MAX_MESSAGE: usize = 64 * 1024;
 pub const MAX_JOIN_INPUT: usize = 4096;
@@ -228,6 +229,117 @@ pub struct Member {
     pub name: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SharedFile {
+    pub id: String,
+    pub room_id: String,
+    pub name: String,
+    pub size: u64,
+    pub publisher_id: String,
+    pub recipient_id: String,
+    pub state: FileState,
+    pub blob_ticket: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FileState {
+    Offered,
+    Accepted,
+    Ready,
+    Completed,
+    Rejected,
+    Cancelled,
+}
+impl FileState {
+    pub fn active(self) -> bool {
+        matches!(self, Self::Offered | Self::Accepted | Self::Ready)
+    }
+    pub fn reaches(self, expected: Self) -> bool {
+        match expected {
+            Self::Offered => matches!(
+                self,
+                Self::Offered | Self::Accepted | Self::Ready | Self::Completed
+            ),
+            Self::Accepted => matches!(self, Self::Accepted | Self::Ready | Self::Completed),
+            Self::Ready => matches!(self, Self::Ready | Self::Completed),
+            _ => self == expected,
+        }
+    }
+}
+impl SharedFile {
+    pub fn validate(&self) -> Result<()> {
+        if !valid_id(&self.id) || self.publisher_id == self.recipient_id {
+            bail!("文件邀请无效");
+        }
+        RoomCode::parse(&self.room_id)?;
+        let _: iroh::EndpointId = self.publisher_id.parse()?;
+        let _: iroh::EndpointId = self.recipient_id.parse()?;
+        validate_filename(&self.name)?;
+        if self.state == FileState::Ready {
+            self.ticket()?;
+        } else if self.blob_ticket.is_some() {
+            bail!("文件尚未准备完成");
+        }
+        Ok(())
+    }
+
+    pub fn same_offer(&self, other: &Self) -> bool {
+        self.id == other.id
+            && self.room_id == other.room_id
+            && self.name == other.name
+            && self.size == other.size
+            && self.publisher_id == other.publisher_id
+            && self.recipient_id == other.recipient_id
+    }
+
+    pub fn accepts_update(&self, next: &Self) -> bool {
+        if !self.same_offer(next) {
+            return false;
+        }
+        if self.state == next.state {
+            return self == next;
+        }
+        match self.state {
+            FileState::Offered => matches!(
+                next.state,
+                FileState::Accepted | FileState::Rejected | FileState::Cancelled
+            ),
+            FileState::Accepted => matches!(next.state, FileState::Ready | FileState::Cancelled),
+            FileState::Ready => matches!(next.state, FileState::Completed | FileState::Cancelled),
+            _ => false,
+        }
+    }
+
+    pub fn ticket(&self) -> Result<iroh_blobs::ticket::BlobTicket> {
+        let value = self.blob_ticket.as_deref().context("文件尚未准备完成")?;
+        if value.len() > 2048 {
+            bail!("文件连接信息无效");
+        }
+        let ticket: iroh_blobs::ticket::BlobTicket = value.parse()?;
+        if ticket.addr().id.to_string() != self.publisher_id
+            || ticket.addr().addrs.len() > 16
+            || ticket.format() != iroh_blobs::BlobFormat::Raw
+        {
+            bail!("文件来源或格式无效");
+        }
+        Ok(ticket)
+    }
+}
+
+pub fn validate_filename(name: &str) -> Result<()> {
+    if name.is_empty()
+        || matches!(name, "." | "..")
+        || name
+            .chars()
+            .any(|ch| ch.is_control() || ch == '/' || ch == '\\')
+    {
+        bail!("文件名无效");
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Room {
@@ -256,6 +368,10 @@ pub struct Snapshot {
     pub event_seq: u64,
     pub endpoint_id: String,
     pub room: Option<Room>,
+    pub files: BTreeMap<String, SharedFile>,
+    pub file_clients: BTreeMap<String, String>,
+    #[serde(skip)]
+    pub file_errors: BTreeMap<String, String>,
     pub join_code: Option<String>,
     pub join_ticket: Option<String>,
     pub capture: Option<LocalMedia>,
@@ -336,6 +452,24 @@ pub enum Wire {
     NetworkBudget {
         generation: String,
         bitrate: u32,
+    },
+    OfferFile {
+        file: SharedFile,
+    },
+    ReadyFile {
+        file: SharedFile,
+    },
+    ChangeFile {
+        file_id: String,
+        state: FileState,
+    },
+    FileTransfer {
+        file: SharedFile,
+    },
+    FileRejected {
+        file_id: String,
+        message: String,
+        current: Option<Box<SharedFile>>,
     },
     Leave,
     Closed,

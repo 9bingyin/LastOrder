@@ -34,9 +34,9 @@ async fn public_relay_transports_media_without_direct_udp() -> Result<()> {
     let coordinator_discovery = Discovery::public(&coordinator_endpoint)?;
     let publisher_discovery = Discovery::public(&publisher_endpoint)?;
     let viewer_discovery = Discovery::public(&viewer_endpoint)?;
-    let coordinator = TestApp::with_discovery(coordinator_endpoint, coordinator_discovery);
-    let publisher = TestApp::with_discovery(publisher_endpoint, publisher_discovery);
-    let viewer = TestApp::with_discovery(viewer_endpoint, viewer_discovery);
+    let coordinator = TestApp::with_discovery(coordinator_endpoint, coordinator_discovery).await?;
+    let publisher = TestApp::with_discovery(publisher_endpoint, publisher_discovery).await?;
+    let viewer = TestApp::with_discovery(viewer_endpoint, viewer_discovery).await?;
     let code = coordinator.create().await?;
     publisher.join(code.clone()).await?;
     viewer.join(code).await?;

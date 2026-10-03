@@ -58,7 +58,7 @@ async fn real_iroh_egress_pressure_reduces_and_recovers_the_remote_publisher_bud
         .transport_config(transport)
         .bind()
         .await?;
-    let coordinator = TestApp::new(endpoint);
+    let coordinator = TestApp::new(endpoint).await?;
     let publisher = TestApp::start().await?;
     let viewer = TestApp::start().await?;
     let code = coordinator.create().await?;
@@ -167,6 +167,9 @@ fn budget_actor(app: &TestApp) -> Result<Actor> {
     let state = Snapshot {
         event_seq: 0,
         endpoint_id: id.clone(),
+        files: Default::default(),
+        file_clients: Default::default(),
+        file_errors: Default::default(),
         room: Some(Room {
             id: code.id(),
             owner_id: id.clone(),

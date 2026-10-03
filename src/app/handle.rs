@@ -1,12 +1,15 @@
 use super::*;
 
 impl Handle {
-    pub fn spawn(
+    pub async fn spawn(
         endpoint: Endpoint,
         tasks: TaskTracker,
         shutdown: CancellationToken,
         discovery: Discovery,
-    ) -> Self {
+    ) -> Result<Self> {
+        let files = crate::files::Files::new()
+            .await
+            .context("初始化文件存储失败")?;
         let (commands, receiver) = mpsc::channel(64);
         let (media_events, media_receiver) = mpsc::channel(32);
         let hub = Hub::new(media_events, tasks.clone(), shutdown.clone());
@@ -14,6 +17,9 @@ impl Handle {
             event_seq: 0,
             endpoint_id: endpoint.id().to_string(),
             room: None,
+            files: Default::default(),
+            file_clients: Default::default(),
+            file_errors: Default::default(),
             join_code: None,
             join_ticket: None,
             capture: None,
@@ -25,6 +31,8 @@ impl Handle {
         let (snapshots, view) = watch::channel(snapshot.clone());
         let handle = Self {
             commands,
+            files,
+            endpoint: endpoint.clone(),
             snapshots: view,
             hub: hub.clone(),
             shutdown: shutdown.clone(),
@@ -50,7 +58,7 @@ impl Handle {
             handle: handle.clone(),
         };
         tasks.spawn(actor.run(receiver, media_receiver));
-        handle
+        Ok(handle)
     }
 
     pub async fn call(&self, client: String, operation: Operation) -> Result<Value> {

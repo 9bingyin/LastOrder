@@ -26,7 +26,7 @@ use crate::{
         Hub, MediaPacket,
         packet::{Reassembler, fragment, generation_bytes},
     },
-    protocol::{ALPN, MAX_MESSAGE, Room, Wire, random_id},
+    protocol::{ALPN, MAX_MESSAGE, Room, VERSION, Wire, random_id},
 };
 
 pub mod budget;
@@ -111,10 +111,11 @@ pub fn router(endpoint: &Endpoint, app: Handle) -> Router {
         .accept(
             ALPN,
             Handler {
-                app,
+                app: app.clone(),
                 connections: Semaphore::new(16),
             },
         )
+        .accept(iroh_blobs::ALPN, crate::files::FileProtocol { app })
         .spawn()
 }
 
@@ -203,7 +204,7 @@ pub async fn join(
             write_message(
                 &mut send,
                 &Wire::Join {
-                    version: 3,
+                    version: VERSION,
                     room_id: code.id(),
                     capability: code.capability(),
                     name,

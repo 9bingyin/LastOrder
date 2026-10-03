@@ -319,7 +319,27 @@ impl Actor {
                 }
                 Ok(json!({}))
             }
+            Operation::OfferFile {
+                room_id,
+                recipient_id,
+                name,
+                size,
+            } => self.offer_file(client, room_id, recipient_id, name, size),
+            Operation::ReadyFile { file } => self.ready_file(file),
+            Operation::ChangeFile { room_id, id, state } => {
+                if matches!(state, FileState::Accepted | FileState::Rejected)
+                    && self.state.file_clients.contains_key(&id)
+                {
+                    return Err(fault("permission_denied", "此邀请已由另一个请求处理", 403));
+                }
+                let value = self.change_file(&room_id, &id, state)?;
+                if matches!(state, FileState::Accepted | FileState::Rejected) {
+                    self.state.file_clients.insert(id, client.into());
+                }
+                Ok(value)
+            }
             Operation::ReleaseClient => {
+                self.release_file_client(client);
                 self.receipts.retain(|receipt| receipt.client != client);
                 if self
                     .state

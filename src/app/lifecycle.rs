@@ -164,6 +164,10 @@ impl Actor {
     }
 
     pub(super) async fn leave(&mut self) {
+        self.state.files.clear();
+        self.state.file_clients.clear();
+        self.state.file_errors.clear();
+        self.handle.files.clear();
         if let Some(publisher) = self.publisher.take() {
             publisher.cancel();
         }

@@ -3,6 +3,24 @@ import { videoProfileSchema } from "./media/quality";
 import { recordDebug } from "./debug/diagnostics";
 
 const memberSchema = z.object({ id: z.string(), name: z.string() });
+export const sharedFileSchema = z.object({
+  id: z.string(),
+  roomId: z.string(),
+  name: z.string(),
+  size: z.number().nonnegative(),
+  publisherId: z.string(),
+  recipientId: z.string(),
+  state: z.enum([
+    "offered",
+    "accepted",
+    "ready",
+    "completed",
+    "rejected",
+    "cancelled",
+  ]),
+  blobTicket: z.string().nullable(),
+});
+export type SharedFile = z.infer<typeof sharedFileSchema>;
 const shareSchema = z.object({
   profile: videoProfileSchema,
   audio: z.boolean(),
@@ -32,6 +50,8 @@ const snapshotSchema = z.object({
       share: shareSchema.nullable(),
     })
     .nullable(),
+  files: z.record(z.string(), sharedFileSchema).default({}),
+  fileClients: z.record(z.string(), z.string()).default({}),
   joinCode: z.string().nullable(),
   joinTicket: z.string().nullable().default(null),
   capture: localMediaSchema.nullable(),

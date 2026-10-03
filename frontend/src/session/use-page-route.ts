@@ -1,15 +1,16 @@
 import { useEffect } from "react";
 import { errorMessage } from "../api";
-import { recordDebug } from "./diagnostics";
+import { recordDebug } from "../debug/diagnostics";
 
-export function useDebugRoute(
+export function usePageRoute(
   token: string | null,
-  setDebug: (debug: boolean) => void,
+  setPage: (page: "/" | "/files" | "/debug") => void,
   setQualityOpen: (open: boolean) => void,
 ) {
   useEffect(() => {
     const pop = () => {
-      setDebug(window.location.pathname === "/debug");
+      const path = window.location.pathname;
+      setPage(path === "/files" || path === "/debug" ? path : "/");
       setQualityOpen(false);
     };
     const error = (event: ErrorEvent) =>
@@ -35,5 +36,5 @@ export function useDebugRoute(
       window.removeEventListener("error", error);
       window.removeEventListener("unhandledrejection", rejection);
     };
-  }, [token, setDebug, setQualityOpen]);
+  }, [token, setPage, setQualityOpen]);
 }

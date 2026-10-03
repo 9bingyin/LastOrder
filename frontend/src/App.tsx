@@ -6,6 +6,8 @@ import { RoomEntry } from "./components/RoomEntry";
 import { RoomPanel } from "./components/RoomPanel";
 import { QualityDialog } from "./components/QualityDialog";
 import { useSession } from "./session/useSession";
+import { FilesPage } from "./files/FilesPage";
+import { MonitorIcon, FolderOpenIcon, CodeIcon } from "@phosphor-icons/react";
 
 export default function App() {
   const session = useSession();
@@ -17,7 +19,8 @@ export default function App() {
     openQuality,
     setQualityOpen,
     debug,
-    setDebug,
+    page,
+    setPage,
     token,
     readDebugMedia,
     readDebugRuntime,
@@ -26,6 +29,12 @@ export default function App() {
     notice,
     setNotice,
   } = session;
+  const pendingFiles = Object.values(session.snapshot?.files ?? {}).filter(
+    (file) =>
+      file.recipientId === session.snapshot?.endpointId &&
+      file.state === "offered" &&
+      !session.snapshot?.fileClients[file.id],
+  ).length;
   return (
     <Dialog.Root
       open={qualityOpen && !!ownCapture && !!captureStream}
@@ -38,29 +47,78 @@ export default function App() {
     >
       <div className="min-h-screen bg-kumo-base text-kumo-default">
         <header className="border-b border-kumo-line">
-          <div className="mx-auto flex max-w-6xl items-center justify-between gap-4 px-5 py-4">
-            <h1 className="text-xl font-semibold text-kumo-strong">
-              LastOrder
-            </h1>
-            <a
-              href={debug ? "/" : "/debug"}
-              className="text-sm text-kumo-subtle hover:text-kumo-default"
-              onClick={(event) => {
-                if (
-                  event.ctrlKey ||
-                  event.metaKey ||
-                  event.shiftKey ||
-                  event.altKey
-                )
-                  return;
-                event.preventDefault();
-                window.history.pushState(null, "", debug ? "/" : "/debug");
-                setDebug(!debug);
-                setQualityOpen(false);
-              }}
+          <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-x-6 gap-y-3 px-5 py-4">
+            <div className="flex items-center gap-3">
+              <h1 className="text-xl font-semibold text-kumo-strong">
+                LastOrder
+              </h1>
+              <span
+                role="status"
+                className="inline-flex items-center gap-1.5 text-sm text-kumo-subtle"
+              >
+                <span
+                  aria-hidden="true"
+                  className={`size-2 rounded-full ${session.connected ? "bg-kumo-success" : "bg-kumo-line"}`}
+                />
+                {!token
+                  ? "未授权"
+                  : session.connected
+                    ? "本地已连接"
+                    : "本地未连接"}
+              </span>
+            </div>
+            <nav
+              aria-label="主要页面"
+              className="flex w-full flex-wrap gap-1 rounded-xl bg-kumo-control/50 p-1 ring ring-kumo-line sm:w-auto"
             >
-              {debug ? "返回" : "Debug"}
-            </a>
+              {(
+                [
+                  ["/", "屏幕共享", MonitorIcon],
+                  ["/files", "文件传输", FolderOpenIcon],
+                  ["/debug", "Debug", CodeIcon],
+                ] as const
+              ).map(([path, label, Icon]) => (
+                <a
+                  key={path}
+                  href={path}
+                  aria-current={page === path ? "page" : undefined}
+                  aria-label={
+                    path === "/files" && pendingFiles
+                      ? `${label}，${pendingFiles} 个待接收邀请`
+                      : label
+                  }
+                  className={`inline-flex min-w-0 flex-1 items-center justify-center gap-2 rounded-lg px-3 py-2 text-sm whitespace-nowrap focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-kumo-brand sm:flex-none ${page === path ? "bg-kumo-base font-medium text-kumo-strong ring ring-kumo-line" : "text-kumo-subtle hover:bg-kumo-control hover:text-kumo-default"}`}
+                  onClick={(event) => {
+                    if (
+                      event.ctrlKey ||
+                      event.metaKey ||
+                      event.shiftKey ||
+                      event.altKey
+                    )
+                      return;
+                    event.preventDefault();
+                    window.history.pushState(null, "", path);
+                    setPage(path);
+                    setQualityOpen(false);
+                  }}
+                >
+                  <Icon
+                    size={16}
+                    aria-hidden="true"
+                    className="hidden shrink-0 sm:block"
+                  />
+                  {label}
+                  {path === "/files" && pendingFiles > 0 && (
+                    <span
+                      aria-hidden="true"
+                      className="rounded-md bg-kumo-info-tint px-1.5 text-sm font-medium text-kumo-info tabular-nums"
+                    >
+                      {pendingFiles}
+                    </span>
+                  )}
+                </a>
+              ))}
+            </nav>
           </div>
         </header>
         {debug && (
@@ -71,7 +129,7 @@ export default function App() {
           />
         )}
         <main
-          className={`mx-auto max-w-6xl gap-6 px-5 py-7 ${debug ? "hidden" : "grid"}`}
+          className={`mx-auto max-w-6xl gap-6 px-5 py-6 ${debug ? "hidden" : "grid"}`}
           aria-hidden={debug}
         >
           {!token && (
@@ -98,11 +156,25 @@ export default function App() {
               )}
             </div>
           )}
-          {!room ? (
-            <RoomEntry session={session} />
-          ) : (
-            <RoomPanel session={session} />
-          )}
+          <div
+            className={page === "/" ? "grid" : "hidden"}
+            aria-hidden={page !== "/"}
+          >
+            {!room ? (
+              <RoomEntry session={session} />
+            ) : (
+              <RoomPanel session={session} />
+            )}
+          </div>
+          <div
+            className={page === "/files" ? "grid" : "hidden"}
+            aria-hidden={page !== "/files"}
+          >
+            <FilesPage
+              key={`${room?.id ?? "none"}:${session.clientId}`}
+              session={session}
+            />
+          </div>
         </main>
         <QualityDialog session={session} />
       </div>

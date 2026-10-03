@@ -1,4 +1,5 @@
 mod budget;
+mod files;
 mod relay;
 mod room;
 mod sharing;
@@ -24,26 +25,27 @@ struct TestApp {
 }
 impl TestApp {
     async fn start() -> Result<Self> {
-        Ok(Self::new(Endpoint::bind(presets::Minimal).await?))
+        Self::new(Endpoint::bind(presets::Minimal).await?).await
     }
-    fn new(endpoint: Endpoint) -> Self {
+    async fn new(endpoint: Endpoint) -> Result<Self> {
         static RECORDS: std::sync::LazyLock<Discovery> = std::sync::LazyLock::new(|| {
             Discovery::Memory(Arc::new(std::sync::Mutex::new(HashMap::new())))
         });
-        Self::with_discovery(endpoint, RECORDS.clone())
+        Self::with_discovery(endpoint, RECORDS.clone()).await
     }
-    fn with_discovery(endpoint: Endpoint, discovery: Discovery) -> Self {
+    async fn with_discovery(endpoint: Endpoint, discovery: Discovery) -> Result<Self> {
         let shutdown = CancellationToken::new();
         let tasks = TaskTracker::new();
-        let app = Handle::spawn(endpoint.clone(), tasks.clone(), shutdown.clone(), discovery);
+        let app =
+            Handle::spawn(endpoint.clone(), tasks.clone(), shutdown.clone(), discovery).await?;
         let router = net::router(&endpoint, app.clone());
-        Self {
+        Ok(Self {
             endpoint,
             app,
             shutdown,
             tasks,
             router,
-        }
+        })
     }
     async fn close(self) -> Result<()> {
         self.shutdown.cancel();

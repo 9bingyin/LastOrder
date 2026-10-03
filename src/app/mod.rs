@@ -1,6 +1,7 @@
 mod actor;
 mod budget;
 mod diagnostics;
+mod files;
 mod handle;
 mod lifecycle;
 mod network;
@@ -22,8 +23,9 @@ use crate::{
     media::{Hub, MediaEvent, Peer},
     net::{self, discovery::Discovery},
     protocol::{
-        JoinTarget, LinkInfo, LocalMedia, Member, QualityMode, Room, RoomCode, RoomTicket, Share,
-        ShareState, Snapshot, VideoProfile, Wire, random_id, secret_matches, validate_name,
+        FileState, JoinTarget, LinkInfo, LocalMedia, Member, QualityMode, Room, RoomCode,
+        RoomTicket, Share, ShareState, SharedFile, Snapshot, VideoProfile, Wire, random_id,
+        secret_matches, validate_name,
     },
 };
 
@@ -86,6 +88,20 @@ pub enum Operation {
     Playing {
         id: String,
     },
+    OfferFile {
+        room_id: String,
+        recipient_id: String,
+        name: String,
+        size: u64,
+    },
+    ReadyFile {
+        file: SharedFile,
+    },
+    ChangeFile {
+        room_id: String,
+        id: String,
+        state: FileState,
+    },
     ReleaseClient,
 }
 
@@ -136,6 +152,8 @@ pub struct Handle {
     commands: mpsc::Sender<Command>,
     pub snapshots: watch::Receiver<Snapshot>,
     pub hub: Arc<Hub>,
+    pub files: Arc<crate::files::Files>,
+    pub endpoint: Endpoint,
     pub shutdown: CancellationToken,
     tasks: TaskTracker,
 }

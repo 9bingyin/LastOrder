@@ -43,13 +43,16 @@ describe("Debug 诊断", () => {
     expect(
       redactDebug({
         joinTicket: "lastorder-secret",
-        room: { id: "room-secret" },
-        message: "lastorder-secret room-secret",
+        room: {
+          id: "room-secret",
+          files: { file: { blobTicket: "blob-secret" } },
+        },
+        message: "lastorder-secret room-secret blob-secret",
       }),
     ).toEqual({
       joinTicket: "[redacted]",
-      room: { id: "[redacted]" },
-      message: "[redacted] [redacted]",
+      room: { id: "[redacted]", files: { file: { blobTicket: "[redacted]" } } },
+      message: "[redacted] [redacted] [redacted]",
     });
     expect(redactDebug({ room: { id: "room-secret" } })).toEqual({
       room: { id: "[redacted]" },

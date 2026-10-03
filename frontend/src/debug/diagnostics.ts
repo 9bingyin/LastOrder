@@ -24,7 +24,7 @@ export function redactDebug(
   secrets: readonly string[] = [],
 ): unknown {
   const sensitive =
-    /^(token|authorization|password|credential|joinCode|joinTicket|capability)$/i;
+    /^(token|authorization|password|credential|joinCode|joinTicket|blobTicket|capability)$/i;
   const known = new Set(
     secrets.filter((secret) => secret && secret !== "[redacted]"),
   );

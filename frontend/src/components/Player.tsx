@@ -18,6 +18,10 @@ import {
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { SessionState } from "../session/useSession";
 
+const controlClass =
+  "flex size-8 cursor-pointer items-center justify-center rounded-lg text-white/80 hover:bg-white/15 hover:text-white focus-visible:outline-2 focus-visible:outline-white/60";
+const activeControlClass = "bg-white/20 text-white";
+
 export function Player({ session }: { session: SessionState }) {
   const [webFullscreen, setWebFullscreen] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
@@ -179,11 +183,31 @@ export function Player({ session }: { session: SessionState }) {
     typeof document !== "undefined" && Boolean(document.pictureInPictureEnabled);
 
   if (!room) return null;
+  const controlsVisible = showControls || isPaused;
+  const silent = isMuted || volume === 0;
+  const status = watchStream
+    ? { label: "正在观看", dot: "bg-kumo-success" }
+    : captureStream
+      ? { label: "本机预览", dot: "bg-kumo-danger" }
+      : { label: "尚未播放", dot: "bg-kumo-line" };
+  const stats = watchStream
+    ? [
+        [
+          "实际接收视频码率",
+          `${receiveStats?.bitrate == null ? "—" : (receiveStats.bitrate / 1_000_000).toFixed(2)} Mbps`,
+        ],
+        ["实际解码分辨率", receiveStats?.resolution ?? "—"],
+        [
+          "本次观看累计解码丢帧，不等同于网络丢包",
+          `丢帧 ${receiveStats?.dropped == null ? "—" : Math.round(receiveStats.dropped)}`,
+        ],
+      ]
+    : [];
   return (
     <Surface
       className={
         webFullscreen
-          ? "fixed inset-0 z-50 rounded-none bg-neutral-950 ring-0"
+          ? "fixed inset-0 z-50 rounded-none bg-black ring-0"
           : "overflow-hidden rounded-xl ring ring-kumo-line"
       }
     >
@@ -191,11 +215,7 @@ export function Player({ session }: { session: SessionState }) {
         ref={containerRef}
         onMouseMove={handleMouseMove}
         onMouseLeave={handleMouseLeave}
-        className={
-          webFullscreen
-            ? "relative flex h-full w-full items-center justify-center bg-neutral-950"
-            : "relative flex aspect-video items-center justify-center bg-neutral-950"
-        }
+        className={`relative flex items-center justify-center bg-black ${webFullscreen ? "h-full w-full" : "aspect-video"} ${hasStream && !controlsVisible ? "cursor-none" : ""}`}
       >
         <video
           ref={video}
@@ -218,15 +238,18 @@ export function Player({ session }: { session: SessionState }) {
           <Button
             className="absolute z-10"
             variant="primary"
+            icon={PlayIcon}
             onClick={() => void perform(resumePlayback)}
           >
             播放
           </Button>
         )}
         {!hasStream && (
-          <div className="grid justify-items-center gap-3 px-5 text-center text-neutral-400">
-            <MonitorIcon size={36} />
-            <p className="text-sm">
+          <div className="grid justify-items-center gap-3 px-5 text-center">
+            <span className="flex size-14 items-center justify-center rounded-full bg-white/5 text-white/50 ring ring-white/10">
+              <MonitorIcon size={28} aria-hidden="true" />
+            </span>
+            <p className="text-sm text-white/60">
               {room.share?.state === "live"
                 ? "分享已开始"
                 : room.share
@@ -237,150 +260,129 @@ export function Player({ session }: { session: SessionState }) {
         )}
 
         {hasStream && (
-          <>
-            <div
-              className={`pointer-events-none absolute inset-x-0 bottom-0 h-28 bg-linear-to-t from-black/75 via-black/25 to-transparent transition-opacity duration-300 ${
-                showControls || isPaused ? "opacity-100" : "opacity-0"
-              }`}
-            />
-            <div
-              className={`absolute inset-x-3 bottom-3 z-20 flex items-center justify-between rounded-xl border border-white/10 bg-neutral-900/80 px-3 py-1.5 text-white shadow-2xl backdrop-blur-xl transition-all duration-300 sm:inset-x-5 sm:bottom-4 sm:px-4 ${
-                showControls || isPaused
-                  ? "translate-y-0 opacity-100"
-                  : "pointer-events-none translate-y-2 opacity-0"
-              }`}
-            >
-              <div className="flex items-center gap-1.5 sm:gap-2">
-                <button
-                  type="button"
-                  title={isPaused ? "播放" : "暂停"}
-                  aria-label={isPaused ? "播放" : "暂停"}
-                  onClick={togglePlay}
-                  className="flex h-8 w-8 cursor-pointer items-center justify-center rounded-lg text-white/80 transition-all duration-150 hover:scale-105 hover:bg-white/15 hover:text-white active:scale-95"
-                >
-                  {isPaused ? (
-                    <PlayIcon size={18} weight="fill" />
-                  ) : (
-                    <PauseIcon size={18} weight="fill" />
-                  )}
-                </button>
-
-                <div className="group/vol flex items-center">
-                  <button
-                    type="button"
-                    title={isMuted || volume === 0 ? "取消静音" : "静音"}
-                    aria-label={isMuted || volume === 0 ? "取消静音" : "静音"}
-                    onClick={toggleMute}
-                    className="flex h-8 w-8 cursor-pointer items-center justify-center rounded-lg text-white/80 transition-all duration-150 hover:scale-105 hover:bg-white/15 hover:text-white active:scale-95"
-                  >
-                    {isMuted || volume === 0 ? (
-                      <SpeakerSlashIcon size={18} />
-                    ) : volume < 0.5 ? (
-                      <SpeakerLowIcon size={18} />
-                    ) : (
-                      <SpeakerHighIcon size={18} />
-                    )}
-                  </button>
-                  <div className="flex w-0 items-center overflow-hidden opacity-0 transition-all duration-200 ease-out group-hover/vol:w-20 group-hover/vol:opacity-100 group-focus-within/vol:w-20 group-focus-within/vol:opacity-100">
-                    <input
-                      type="range"
-                      min={0}
-                      max={1}
-                      step={0.02}
-                      value={isMuted ? 0 : volume}
-                      onChange={handleVolumeChange}
-                      aria-label="音量调节"
-                      title={`音量: ${Math.round((isMuted ? 0 : volume) * 100)}%`}
-                      className="h-1.5 w-18 cursor-pointer appearance-none rounded-full bg-white/25 accent-white transition-all hover:bg-white/40 focus:outline-none"
-                    />
-                  </div>
-                </div>
-
-                <div className="ml-1 flex select-none items-center gap-1.5 rounded-full border border-red-500/30 bg-red-500/10 px-2 py-0.5 text-[11px] font-medium tracking-wide text-red-400">
-                  <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-red-500" />
-                  <span>实时</span>
-                </div>
-              </div>
-
-              <div className="flex items-center gap-1">
-                {pipSupported && (
-                  <button
-                    type="button"
-                    title="画中画"
-                    aria-label="画中画"
-                    onClick={() => void togglePip()}
-                    className="flex h-8 w-8 cursor-pointer items-center justify-center rounded-lg text-white/80 transition-all duration-150 hover:scale-105 hover:bg-white/15 hover:text-white active:scale-95"
-                  >
-                    <PictureInPictureIcon size={18} />
-                  </button>
+          <div
+            className={`absolute inset-x-0 bottom-0 z-20 flex items-center justify-between gap-2 bg-linear-to-t from-black/80 to-transparent px-3 pt-10 pb-2 text-white transition-opacity duration-200 ${
+              controlsVisible ? "opacity-100" : "pointer-events-none opacity-0"
+            }`}
+          >
+            <div className="flex items-center gap-1">
+              <button
+                type="button"
+                title={isPaused ? "播放" : "暂停"}
+                aria-label={isPaused ? "播放" : "暂停"}
+                onClick={togglePlay}
+                className={controlClass}
+              >
+                {isPaused ? (
+                  <PlayIcon size={18} weight="fill" />
+                ) : (
+                  <PauseIcon size={18} weight="fill" />
                 )}
-
+              </button>
+              <div className="group/vol flex items-center">
                 <button
                   type="button"
-                  title={webFullscreen ? "退出网页全屏 (Esc)" : "网页全屏"}
-                  aria-label={webFullscreen ? "退出网页全屏" : "网页全屏"}
-                  onClick={() => setWebFullscreen((prev) => !prev)}
-                  className={`flex h-8 w-8 cursor-pointer items-center justify-center rounded-lg text-white/80 transition-all duration-150 hover:scale-105 hover:bg-white/15 hover:text-white active:scale-95 ${
-                    webFullscreen
-                      ? "bg-white/20 text-white shadow-sm ring-1 ring-white/30"
-                      : ""
-                  }`}
+                  title={silent ? "取消静音" : "静音"}
+                  aria-label={silent ? "取消静音" : "静音"}
+                  onClick={toggleMute}
+                  className={controlClass}
                 >
-                  <AppWindowIcon size={18} />
-                </button>
-
-                <button
-                  type="button"
-                  title={isFullscreen ? "退出全屏" : "全屏"}
-                  aria-label={isFullscreen ? "退出全屏" : "全屏"}
-                  onClick={() => void toggleSystemFullscreen()}
-                  className={`flex h-8 w-8 cursor-pointer items-center justify-center rounded-lg text-white/80 transition-all duration-150 hover:scale-105 hover:bg-white/15 hover:text-white active:scale-95 ${
-                    isFullscreen
-                      ? "bg-white/20 text-white shadow-sm ring-1 ring-white/30"
-                      : ""
-                  }`}
-                >
-                  {isFullscreen ? (
-                    <CornersInIcon size={18} />
+                  {silent ? (
+                    <SpeakerSlashIcon size={18} />
+                  ) : volume < 0.5 ? (
+                    <SpeakerLowIcon size={18} />
                   ) : (
-                    <CornersOutIcon size={18} />
+                    <SpeakerHighIcon size={18} />
                   )}
                 </button>
+                <div className="flex w-0 items-center overflow-hidden transition-[width] duration-200 group-hover/vol:w-20 group-focus-within/vol:w-20">
+                  <input
+                    type="range"
+                    min={0}
+                    max={1}
+                    step={0.02}
+                    value={isMuted ? 0 : volume}
+                    onChange={handleVolumeChange}
+                    aria-label="音量调节"
+                    title={`音量: ${Math.round((isMuted ? 0 : volume) * 100)}%`}
+                    className="ml-1 h-1 w-18 cursor-pointer appearance-none rounded-full bg-white/30 accent-white focus:outline-none"
+                  />
+                </div>
               </div>
+              <span className="ml-2 inline-flex select-none items-center gap-1.5 text-sm font-medium text-white/90">
+                <span className="size-1.5 animate-pulse rounded-full bg-red-500" />
+                实时
+              </span>
             </div>
-          </>
+
+            <div className="flex items-center gap-1">
+              {pipSupported && (
+                <button
+                  type="button"
+                  title="画中画"
+                  aria-label="画中画"
+                  onClick={() => void togglePip()}
+                  className={controlClass}
+                >
+                  <PictureInPictureIcon size={18} />
+                </button>
+              )}
+              <button
+                type="button"
+                title={webFullscreen ? "退出网页全屏 (Esc)" : "网页全屏"}
+                aria-label={webFullscreen ? "退出网页全屏" : "网页全屏"}
+                onClick={() => setWebFullscreen((prev) => !prev)}
+                className={`${controlClass} ${webFullscreen ? activeControlClass : ""}`}
+              >
+                <AppWindowIcon size={18} />
+              </button>
+              <button
+                type="button"
+                title={isFullscreen ? "退出全屏" : "全屏"}
+                aria-label={isFullscreen ? "退出全屏" : "全屏"}
+                onClick={() => void toggleSystemFullscreen()}
+                className={`${controlClass} ${isFullscreen ? activeControlClass : ""}`}
+              >
+                {isFullscreen ? (
+                  <CornersInIcon size={18} />
+                ) : (
+                  <CornersOutIcon size={18} />
+                )}
+              </button>
+            </div>
+          </div>
         )}
       </div>
 
       {!webFullscreen && (
-        <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3">
-          <span className="text-sm text-kumo-subtle">
-            {watchStream ? "正在观看" : captureStream ? "本机预览" : "尚未播放"}
-          </span>
-          {watchStream && (
-            <div
-              role="group"
-              aria-label="观看统计"
-              className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-kumo-subtle tabular-nums"
-            >
-              <span title="实际接收视频码率">
-                码率{" "}
-                {receiveStats?.bitrate == null
-                  ? "—"
-                  : (receiveStats.bitrate / 1_000_000).toFixed(2)}{" "}
-                Mbps
+        <div className="flex flex-wrap items-center justify-between gap-3 border-t border-kumo-line px-4 py-3">
+          <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-sm text-kumo-subtle">
+            <span className="inline-flex items-center gap-2 font-medium text-kumo-default">
+              <span
+                aria-hidden="true"
+                className={`size-2 rounded-full ${status.dot}`}
+              />
+              {status.label}
+            </span>
+            {stats.length > 0 && (
+              <span
+                role="group"
+                aria-label="观看统计"
+                className="flex flex-wrap items-center gap-x-2 tabular-nums"
+              >
+                {stats.map(([title, value], index) => (
+                  <span key={title} title={title}>
+                    {index > 0 && (
+                      <span aria-hidden="true" className="mr-2 text-kumo-line">
+                        /
+                      </span>
+                    )}
+                    {value}
+                  </span>
+                ))}
               </span>
-              <span title="实际解码分辨率">
-                分辨率 {receiveStats?.resolution ?? "—"}
-              </span>
-              <span title="本次观看累计解码丢帧，不等同于网络丢包">
-                丢帧{" "}
-                {receiveStats?.dropped == null
-                  ? "—"
-                  : Math.round(receiveStats.dropped)}
-              </span>
-            </div>
-          )}
+            )}
+          </div>
           <div className="flex flex-wrap items-center gap-2">
             {ownCapture && captureStream && (
               <Dialog.Trigger
@@ -394,25 +396,6 @@ export function Player({ session }: { session: SessionState }) {
                 }
               />
             )}
-            {snapshot?.capture ? (
-              <Button
-                variant="secondary-destructive"
-                icon={StopIcon}
-                disabled={!available || !ownCapture}
-                onClick={() => void perform(stopCapture)}
-              >
-                停止分享
-              </Button>
-            ) : (
-              <Button
-                variant="primary"
-                icon={MonitorIcon}
-                disabled={!available || !!room.share}
-                onClick={() => void perform(startCapture)}
-              >
-                开始分享
-              </Button>
-            )}
             {!isPublisher &&
               room.share?.state === "live" &&
               (snapshot?.subscription ? (
@@ -425,6 +408,7 @@ export function Player({ session }: { session: SessionState }) {
                 </Button>
               ) : (
                 <Button
+                  variant="primary"
                   icon={PlayIcon}
                   disabled={!available}
                   onClick={() => void perform(startWatching)}
@@ -432,6 +416,25 @@ export function Player({ session }: { session: SessionState }) {
                   观看
                 </Button>
               ))}
+            {snapshot?.capture ? (
+              <Button
+                variant="secondary-destructive"
+                icon={StopIcon}
+                disabled={!available || !ownCapture}
+                onClick={() => void perform(stopCapture)}
+              >
+                停止分享
+              </Button>
+            ) : (
+              <Button
+                variant={room.share ? "secondary" : "primary"}
+                icon={MonitorIcon}
+                disabled={!available || !!room.share}
+                onClick={() => void perform(startCapture)}
+              >
+                开始分享
+              </Button>
+            )}
           </div>
         </div>
       )}

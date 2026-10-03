@@ -21,7 +21,9 @@ impl Actor {
             bail!("加入握手无效");
         };
         let code = self.code.as_ref().context("房间不存在")?;
-        if version != 3 || room_id != code.id() || !secret_matches(&capability, &code.capability())
+        if version != crate::protocol::VERSION
+            || room_id != code.id()
+            || !secret_matches(&capability, &code.capability())
         {
             bail!("加入凭证无效");
         }
@@ -40,6 +42,7 @@ impl Actor {
         {
             self.end_share().await;
         }
+        self.cancel_peer_files(&id);
         let room = self.state.room.as_mut().context("房间不存在")?;
         room.members.insert(
             id.clone(),
@@ -79,6 +82,7 @@ impl Actor {
                     .is_some_and(|entry| entry.session == session)
                 {
                     self.peers.remove(&peer);
+                    self.cancel_peer_files(&peer);
                     if self
                         .state
                         .room
@@ -307,6 +311,66 @@ impl Actor {
                                 self.request_keyframe(&generation).await;
                             }
                         }
+                        Wire::OfferFile { file } | Wire::ReadyFile { file } => {
+                            let id = file.id.clone();
+                            let result = if file.state == FileState::Offered {
+                                self.add_file(&peer, file)
+                            } else {
+                                self.apply_ready(&peer, file)
+                            };
+                            if let Err(error) = result
+                                && let Some(remote) = self.peers.get(&peer)
+                                && remote
+                                    .sender
+                                    .try_send(Wire::FileRejected {
+                                        current: self
+                                            .state
+                                            .files
+                                            .get(&id)
+                                            .filter(|file| {
+                                                file.publisher_id == peer
+                                                    || file.recipient_id == peer
+                                            })
+                                            .cloned()
+                                            .map(Box::new),
+                                        file_id: id,
+                                        message: error.to_string(),
+                                    })
+                                    .is_err()
+                            {
+                                remote.connection.close(0u32.into(), b"control queue full");
+                            }
+                        }
+                        Wire::ChangeFile { file_id, state } => {
+                            let room_id = self
+                                .state
+                                .room
+                                .as_ref()
+                                .map(|room| room.id.clone())
+                                .unwrap_or_default();
+                            if let Err(error) = self.apply_change(&peer, &room_id, &file_id, state)
+                                && let Some(remote) = self.peers.get(&peer)
+                                && remote
+                                    .sender
+                                    .try_send(Wire::FileRejected {
+                                        current: self
+                                            .state
+                                            .files
+                                            .get(&file_id)
+                                            .filter(|file| {
+                                                file.publisher_id == peer
+                                                    || file.recipient_id == peer
+                                            })
+                                            .cloned()
+                                            .map(Box::new),
+                                        file_id,
+                                        message: error.to_string(),
+                                    })
+                                    .is_err()
+                            {
+                                remote.connection.close(0u32.into(), b"control queue full");
+                            }
+                        }
                         Wire::Leave => {
                             if let Some(remote) = self.peers.get(&peer) {
                                 remote.connection.close(0u32.into(), b"member left");
@@ -463,6 +527,53 @@ impl Actor {
                             {
                                 self.unsubscribe().await;
                                 self.state.error = Some(message);
+                            }
+                        }
+                        Wire::FileTransfer { file } => {
+                            if file.validate().is_ok()
+                                && self
+                                    .state
+                                    .room
+                                    .as_ref()
+                                    .is_some_and(|room| room.id == file.room_id)
+                                && (file.publisher_id == self.state.endpoint_id
+                                    || file.recipient_id == self.state.endpoint_id)
+                                && self
+                                    .state
+                                    .files
+                                    .get(&file.id)
+                                    .map_or(file.state == FileState::Offered, |previous| {
+                                        previous.accepts_update(&file)
+                                    })
+                            {
+                                self.state.files.insert(file.id.clone(), file);
+                            } else if let Some(upstream) = &self.upstream {
+                                upstream
+                                    .connection
+                                    .close(0u32.into(), b"invalid file invitation");
+                            }
+                        }
+                        Wire::FileRejected {
+                            file_id,
+                            message,
+                            current,
+                        } => {
+                            self.handle.files.remove(&file_id);
+                            self.state.file_errors.insert(file_id.clone(), message);
+                            if let Some(file) = current.filter(|file| {
+                                file.id == file_id
+                                    && file.validate().is_ok()
+                                    && self
+                                        .state
+                                        .files
+                                        .get(&file_id)
+                                        .is_none_or(|previous| previous.same_offer(file))
+                                    && (file.publisher_id == self.state.endpoint_id
+                                        || file.recipient_id == self.state.endpoint_id)
+                            }) {
+                                self.state.files.insert(file_id, *file);
+                            } else if !self.state.files.contains_key(&file_id) {
+                                self.state.file_clients.remove(&file_id);
                             }
                         }
                         Wire::Error { message } => {

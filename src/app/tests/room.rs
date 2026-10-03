@@ -14,6 +14,50 @@ async fn diagnostics_reports_connections_without_mutating_room_or_leaking_join_c
             .is_some_and(|room| room.members.len() == 2)
     })
     .await?;
+    let staged = tempfile::NamedTempFile::new()?;
+    tokio::fs::write(staged.path(), b"diagnostic file").await?;
+    let offer: SharedFile = serde_json::from_value(
+        server
+            .app
+            .call(
+                "page".into(),
+                Operation::OfferFile {
+                    room_id: code.clone(),
+                    recipient_id: guest.endpoint.id().to_string(),
+                    name: "data.bin".into(),
+                    size: 15,
+                },
+            )
+            .await?,
+    )?;
+    wait_state(&guest.app, |state| state.files.contains_key(&offer.id)).await?;
+    let accepted: SharedFile = serde_json::from_value(
+        guest
+            .app
+            .call(
+                "page".into(),
+                Operation::ChangeFile {
+                    room_id: code.clone(),
+                    id: offer.id.clone(),
+                    state: FileState::Accepted,
+                },
+            )
+            .await?,
+    )?;
+    server
+        .app
+        .wait_file(&accepted, CancellationToken::new())
+        .await?;
+    let file = server
+        .app
+        .prepare_file(
+            "page".into(),
+            code.clone(),
+            offer.id,
+            staged.path(),
+            CancellationToken::new(),
+        )
+        .await?;
     let revision = server
         .app
         .snapshots
@@ -25,6 +69,12 @@ async fn diagnostics_reports_connections_without_mutating_room_or_leaking_join_c
     let debug = server.app.diagnostics().await?;
     assert_eq!(debug["snapshot"]["joinCode"], "[redacted]");
     assert!(!debug.to_string().contains(&code));
+    assert!(
+        !debug
+            .to_string()
+            .contains(file.blob_ticket.as_deref().context("没有文件 Ticket")?)
+    );
+    assert_eq!(server.app.shared_file(&code, &file.id)?, file);
     assert_eq!(
         debug["connections"][0]["remoteId"],
         guest.endpoint.id().to_string()
@@ -53,8 +103,9 @@ async fn uuid_and_ticket_join_the_same_room_without_ticket_discovery_and_members
 -> Result<()> {
     let discovery = Discovery::Memory(Arc::new(std::sync::Mutex::new(HashMap::new())));
     let server =
-        TestApp::with_discovery(Endpoint::bind(presets::Minimal).await?, discovery.clone());
-    let uuid_guest = TestApp::with_discovery(Endpoint::bind(presets::Minimal).await?, discovery);
+        TestApp::with_discovery(Endpoint::bind(presets::Minimal).await?, discovery.clone()).await?;
+    let uuid_guest =
+        TestApp::with_discovery(Endpoint::bind(presets::Minimal).await?, discovery).await?;
     let ticket_guest = TestApp::start().await?;
     let forwarded_guest = TestApp::start().await?;
     let code = server.create().await?;
@@ -132,7 +183,7 @@ async fn joins_require_capability_and_media_requires_subscription() -> Result<()
     net::write_message(
         &mut send,
         &Wire::Join {
-            version: 3,
+            version: crate::protocol::VERSION,
             room_id: code.id(),
             capability: secret()?,
             name: "成员".into(),
@@ -253,7 +304,7 @@ async fn cancelled_attach_rolls_back_membership() -> Result<()> {
             connection: connection.clone(),
             session: random_id()?,
             hello: Wire::Join {
-                version: 3,
+                version: crate::protocol::VERSION,
                 room_id: code.id(),
                 capability: code.capability(),
                 name: "成员".into(),

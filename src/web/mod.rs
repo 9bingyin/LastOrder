@@ -1,6 +1,7 @@
 mod access;
 mod api;
 mod events;
+mod files;
 #[cfg(test)]
 mod tests;
 
@@ -90,7 +91,8 @@ pub fn router(state: WebState, frontend: Option<PathBuf>) -> Router {
         .route_layer(middleware::from_fn_with_state(state.clone(), authorize));
     let app = Router::new().nest("/api/v1", api);
     let app = if let Some(dir) = frontend {
-        app.route_service("/debug", ServeFile::new(dir.join("index.html")))
+        app.route_service("/files", ServeFile::new(dir.join("index.html")))
+            .route_service("/debug", ServeFile::new(dir.join("index.html")))
             .fallback_service(ServeDir::new(dir))
     } else {
         app.fallback(embedded_handler)

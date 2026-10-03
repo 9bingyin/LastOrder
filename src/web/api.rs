@@ -1,7 +1,10 @@
 use super::events::events;
 use super::*;
 
-fn client(state: &WebState, headers: &HeaderMap) -> Result<(String, CancellationToken), ApiError> {
+pub(super) fn client(
+    state: &WebState,
+    headers: &HeaderMap,
+) -> Result<(String, CancellationToken), ApiError> {
     let session = headers
         .get("x-client-id")
         .and_then(|value| value.to_str().ok())
@@ -201,6 +204,7 @@ async fn offer(
 
 pub(super) fn routes() -> Router<WebState> {
     Router::new()
+        .merge(files::routes())
         .route("/status", get(status))
         .route("/stats", get(status))
         .route("/debug", get(debug))

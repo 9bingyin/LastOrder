@@ -295,6 +295,9 @@ async fn a_full_stop_queue_disconnects_and_releases_the_live_slot() -> Result<()
     let state = Snapshot {
         event_seq: 0,
         endpoint_id: member.endpoint.id().to_string(),
+        files: Default::default(),
+        file_clients: Default::default(),
+        file_errors: Default::default(),
         room,
         join_code: Some(code.id()),
         join_ticket: None,

@@ -58,10 +58,17 @@ impl Actor {
     }
 
     pub(super) fn emit(&mut self) {
+        self.reconcile_file_transfers();
+        self.handle.files.reconcile(&self.state);
         self.refresh_budget();
         self.state.join_ticket = self.ticket();
         self.state.event_seq = self.state.event_seq.saturating_add(1);
-        self.snapshots.send_replace(self.state.clone());
+        let mut snapshot = self.state.clone();
+        snapshot.files.retain(|_, file| {
+            file.publisher_id == snapshot.endpoint_id || file.recipient_id == snapshot.endpoint_id
+        });
+        log_changes(&self.snapshots.borrow(), &snapshot);
+        self.snapshots.send_replace(snapshot);
     }
 
     pub(super) fn owner(&self) -> bool {
@@ -103,5 +110,89 @@ impl Actor {
                 }
             }
         }
+    }
+}
+
+fn log_changes(prev: &Snapshot, next: &Snapshot) {
+    let member = |room: &Room, id: &str| {
+        room.members
+            .get(id)
+            .map_or(id, |member| member.name.as_str())
+            .to_owned()
+    };
+    let live = |room: &Room| {
+        room.share
+            .as_ref()
+            .filter(|share| share.state == ShareState::Live)
+            .map(|share| (share.id.clone(), share.publisher_id.clone()))
+    };
+    match (&prev.room, &next.room) {
+        (None, Some(room)) if room.owner_id == next.endpoint_id => {
+            tracing::info!("已创建房间");
+        }
+        (None, Some(room)) => tracing::info!("已加入房间，共 {} 人", room.members.len()),
+        (Some(_), None) => tracing::info!("已离开房间"),
+        (Some(old), Some(room)) if old.id == room.id => {
+            for (id, joined) in &room.members {
+                if !old.members.contains_key(id) {
+                    tracing::info!("{} 加入了房间", joined.name);
+                }
+            }
+            for (id, left) in &old.members {
+                if !room.members.contains_key(id) {
+                    tracing::info!("{} 离开了房间", left.name);
+                }
+            }
+            let (before, after) = (live(old), live(room));
+            if before != after {
+                if let Some((_, publisher)) = &before {
+                    tracing::info!("{} 结束了分享", member(old, publisher));
+                }
+                if let Some((_, publisher)) = &after {
+                    tracing::info!("{} 开始分享", member(room, publisher));
+                }
+            }
+        }
+        _ => {}
+    }
+    match (&prev.subscription, &next.subscription) {
+        (None, Some(_)) => tracing::info!("开始观看"),
+        (Some(_), None) => tracing::info!("停止观看"),
+        _ => {}
+    }
+    if let Some(link) = &next.connection
+        && prev.connection.as_ref().map(|link| &link.path) != Some(&link.path)
+    {
+        let path = match link.path.as_str() {
+            "direct" => "直连",
+            "relay" => "中继",
+            "down" => "已断开",
+            _ => "未知",
+        };
+        tracing::info!("连接方式：{path}");
+    }
+    for (id, file) in &next.files {
+        if prev.files.get(id).map(|old| old.state) == Some(file.state) {
+            continue;
+        }
+        let direction = if file.publisher_id == next.endpoint_id {
+            "发送"
+        } else {
+            "接收"
+        };
+        let state = match file.state {
+            FileState::Offered => "等待对方接收",
+            FileState::Accepted => "已接受",
+            FileState::Ready => "传输中",
+            FileState::Completed => "已完成",
+            FileState::Rejected => "已拒绝",
+            FileState::Cancelled => "已取消",
+        };
+        tracing::info!("{direction}文件 {}：{state}", file.name);
+    }
+    if let Some(error) = &next.error
+        && prev.error.as_ref() != Some(error)
+    {
+        tracing::warn!("{error}");
     }
 }

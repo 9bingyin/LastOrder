@@ -10,7 +10,7 @@ import type { Snapshot } from "../api";
 import { generateNickname } from "../room/nickname";
 import { recordDebug } from "../debug/diagnostics";
 import type { DebugMedia } from "../debug/diagnostics";
-import { useDebugRoute } from "../debug/use-debug-route";
+import { usePageRoute } from "./use-page-route";
 import { MediaSession } from "./media-session";
 import { useViewerStats } from "../media/use-viewer-stats";
 import type { ViewerStats } from "../media/viewer-stats";
@@ -19,9 +19,11 @@ import { defaultProfile, videoProfileSchema } from "../media/quality";
 
 export function useSession() {
   const [token] = useState(readToken);
-  const [debug, setDebug] = useState(
-    () => window.location.pathname === "/debug",
-  );
+  const [page, setPage] = useState<"/" | "/files" | "/debug">(() => {
+    const path = window.location.pathname;
+    return path === "/files" || path === "/debug" ? path : "/";
+  });
+  const debug = page === "/debug";
   const rawSnapshot = useRef<unknown>(null);
   const runtime = useRef<unknown>(null);
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
@@ -72,7 +74,7 @@ export function useSession() {
   const clearCapture = useCallback(() => media.clearCapture(), [media]);
   const clearWatching = useCallback(() => media.clearWatching(), [media]);
 
-  useDebugRoute(token, setDebug, setQualityOpen);
+  usePageRoute(token, setPage, setQualityOpen);
 
   const readDebugMedia = useCallback((): DebugMedia[] => {
     const resources: DebugMedia[] = [];
@@ -334,7 +336,8 @@ export function useSession() {
   return {
     token,
     debug,
-    setDebug,
+    page,
+    setPage,
     snapshot,
     clientId,
     connected,

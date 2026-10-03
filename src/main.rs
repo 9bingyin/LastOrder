@@ -1,4 +1,5 @@
 mod app;
+mod files;
 mod media;
 mod net;
 mod protocol;
@@ -15,12 +16,12 @@ use clap::Parser;
 use iroh::{Endpoint, endpoint::presets};
 use tokio::net::TcpListener;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
-use tracing_subscriber::EnvFilter;
+use tracing_subscriber::{EnvFilter, fmt::time::ChronoLocal};
 
 #[derive(Parser)]
 #[command(
     version,
-    about = "基于 Iroh 的屏幕共享；所有用户运行 CLI，在本机浏览器操作"
+    about = "基于 Iroh 的屏幕与文件共享；所有用户运行 CLI，在本机浏览器操作"
 )]
 struct Args {
     #[arg(
@@ -41,6 +42,8 @@ async fn main() -> Result<()> {
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("lastorder=info")),
         )
+        .with_target(false)
+        .with_timer(ChronoLocal::new("%H:%M:%S".into()))
         .init();
     let args = Args::parse();
     if let Some(ref dir) = args.frontend_dir
@@ -55,15 +58,16 @@ async fn main() -> Result<()> {
     let endpoint = tokio::time::timeout(Duration::from_secs(15), Endpoint::bind(presets::N0))
         .await
         .context("初始化 Iroh 超时")??;
+    tracing::info!("Iroh 节点已启动：{}", endpoint.id().fmt_short());
     let shutdown = CancellationToken::new();
     let tasks = TaskTracker::new();
     let discovery = net::discovery::Discovery::public(&endpoint)?;
-    let app = app::Handle::spawn(endpoint.clone(), tasks.clone(), shutdown.clone(), discovery);
+    let app =
+        app::Handle::spawn(endpoint.clone(), tasks.clone(), shutdown.clone(), discovery).await?;
     let router = net::router(&endpoint, app.clone());
     let token = protocol::secret()?;
     let url = format!("http://127.0.0.1:{port}/#token={token}");
-    println!("本地 WebUI：{url}");
-    println!("访问凭证仅供本机使用。按 Ctrl-C 退出。");
+    println!("请打开：{url}");
     if !args.no_open
         && let Err(error) = webbrowser::open(&url)
     {
@@ -79,6 +83,7 @@ async fn main() -> Result<()> {
             }
         })
         .await;
+    tracing::info!("正在退出");
     shutdown.cancel();
     tasks.close();
     let drained = tokio::time::timeout(Duration::from_secs(15), tasks.wait()).await;
