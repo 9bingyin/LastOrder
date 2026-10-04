@@ -112,6 +112,10 @@ pub enum DisconnectReason {
 }
 
 pub enum NetworkEvent {
+    DiscoveryUpdated {
+        room_id: String,
+        error: Option<String>,
+    },
     Message {
         peer: String,
         session: String,

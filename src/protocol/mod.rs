@@ -374,6 +374,7 @@ pub struct Snapshot {
     pub file_errors: BTreeMap<String, String>,
     pub join_code: Option<String>,
     pub join_ticket: Option<String>,
+    pub discovery_error: Option<String>,
     pub capture: Option<LocalMedia>,
     pub subscription: Option<LocalMedia>,
     pub connection: Option<LinkInfo>,

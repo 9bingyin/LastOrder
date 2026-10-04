@@ -84,6 +84,22 @@ async fn diagnostics_reports_connections_without_mutating_room_or_leaking_join_c
             .as_str()
             .is_some_and(|stats| stats.contains("udp_tx"))
     );
+    assert_eq!(
+        debug["connections"][0]["remoteAddresses"]["status"],
+        "available"
+    );
+    assert!(
+        debug["connections"][0]["remoteAddresses"]["addresses"]
+            .as_array()
+            .is_some_and(|addresses| addresses.iter().any(|address| {
+                address["address"]
+                    .as_str()
+                    .is_some_and(|value| value.starts_with("Ip("))
+            }))
+    );
+    assert!(debug["network"]["localIpAddresses"].is_array());
+    assert!(debug["network"]["counters"]["holepunchAttempts"].is_u64());
+    assert!(debug["network"]["portMapping"]["attempts"].is_u64());
     assert_eq!(debug["snapshot"]["room"]["revision"], revision);
     assert_eq!(
         server.app.snapshots.borrow().join_code.as_deref(),
@@ -96,6 +112,73 @@ async fn diagnostics_reports_connections_without_mutating_room_or_leaking_join_c
     guest.close().await?;
     server.close().await?;
     Ok(())
+}
+
+#[tokio::test]
+async fn room_creation_falls_back_to_ticket_when_discovery_is_unavailable() -> Result<()> {
+    let server = TestApp::with_discovery(
+        Endpoint::bind(presets::Minimal).await?,
+        Discovery::Unavailable,
+    )
+    .await?;
+    let guest = TestApp::with_discovery(
+        Endpoint::bind(presets::Minimal).await?,
+        Discovery::Unavailable,
+    )
+    .await?;
+    let result = server
+        .app
+        .call(
+            "page".into(),
+            Operation::Create {
+                name: "房主".into(),
+            },
+        )
+        .await?;
+    let state = server.app.snapshots.borrow().clone();
+    assert!(state.error.is_none());
+    assert!(
+        state
+            .discovery_error
+            .as_deref()
+            .is_some_and(|error| error.contains("模拟发现服务不可用"))
+    );
+    let ticket = state.join_ticket.context("没有降级 Ticket")?;
+    assert_eq!(result["joinTicket"], ticket);
+    let JoinTarget::Ticket { address, .. } = JoinTarget::parse(&ticket)? else {
+        bail!("没有识别降级 Ticket");
+    };
+    assert_eq!(address.id, server.endpoint.id());
+    guest.join(ticket).await?;
+    wait_state(&server.app, |state| {
+        state
+            .room
+            .as_ref()
+            .is_some_and(|room| room.members.len() == 2)
+    })
+    .await?;
+    let code = state.join_code.context("没有房间码")?;
+    server
+        .app
+        .network(NetworkEvent::DiscoveryUpdated {
+            room_id: "过期房间".into(),
+            error: None,
+        })
+        .await?;
+    wait_state(&server.app, |next| next.event_seq > state.event_seq).await?;
+    assert!(server.app.snapshots.borrow().discovery_error.is_some());
+    server
+        .app
+        .network(NetworkEvent::DiscoveryUpdated {
+            room_id: code,
+            error: None,
+        })
+        .await?;
+    wait_state(&server.app, |state| state.discovery_error.is_none()).await?;
+    server.app.call("page".into(), Operation::Leave).await?;
+    assert!(server.app.snapshots.borrow().discovery_error.is_none());
+    guest.close().await?;
+    server.close().await
 }
 
 #[tokio::test]

@@ -24,7 +24,7 @@ export function RoomPanel({ session }: { session: SessionState }) {
       setTimeout(() => setCopied((current) => (current === key ? null : current)), 1500);
     });
   const invites = [
-    ["code", "复制加入码", snapshot?.joinCode],
+    ["code", "复制加入码", snapshot?.discoveryError ? null : snapshot?.joinCode],
     ["ticket", "复制 Ticket", snapshot?.joinTicket],
   ] as const;
   return (
@@ -37,6 +37,11 @@ export function RoomPanel({ session }: { session: SessionState }) {
               {members.length} 人
             </span>
           </h2>
+          {snapshot?.discoveryError && (
+            <p role="status" className="text-sm text-kumo-subtle">
+              房间发现服务暂不可用，请复制 Ticket 邀请；服务恢复后可使用加入码。
+            </p>
+          )}
           <ul aria-label="房间成员" className="flex flex-wrap gap-1.5">
             {members.map((member) => {
               const sharing = member.id === room.share?.publisherId;

@@ -71,6 +71,11 @@ impl Actor {
 
     pub(super) async fn network(&mut self, event: NetworkEvent) {
         match event {
+            NetworkEvent::DiscoveryUpdated { room_id, error } => {
+                if self.owner() && self.state.join_code.as_deref() == Some(room_id.as_str()) {
+                    self.state.discovery_error = error;
+                }
+            }
             NetworkEvent::Detached {
                 peer,
                 session,

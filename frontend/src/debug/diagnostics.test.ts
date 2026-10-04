@@ -94,11 +94,22 @@ describe("Debug 诊断", () => {
           remoteId: "remote",
           statsRaw: "raw",
           future: 42,
+          remoteAddresses: {
+            status: "available",
+            addresses: [{ address: "Ip(192.0.2.1:5000)", usage: "Inactive" }],
+          },
           paths: [{ statsRaw: "path", custom: true }],
         },
       ],
       localWebRtc: {},
       actor: {},
+      network: {
+        localIpAddresses: ["192.0.2.2:5000"],
+        relayUrls: [],
+        report: null,
+        counters: { scope: "endpoint_lifetime", holepunchAttempts: 3 },
+        portMapping: { scope: "endpoint_lifetime", attempts: 1 },
+      },
       extra: 9,
     };
     expect(diagnosticsSchema.parse(raw)).toEqual(raw);

@@ -60,6 +60,35 @@ describe("本地 API 契约", () => {
       },
     });
     expect(parsed.data.joinTicket).toBeNull();
+    expect(parsed.data.discoveryError).toBeNull();
+  });
+  it("保留发现服务失败状态和可用 Ticket", () => {
+    const parsed = eventSchema.parse({
+      type: "snapshot",
+      clientId: "page",
+      data: {
+        eventSeq: 1,
+        endpointId: "node",
+        room: {
+          id: "room",
+          ownerId: "node",
+          revision: 1,
+          members: { node: { id: "node", name: "房主" } },
+          share: null,
+        },
+        joinCode: "room",
+        joinTicket: "lastorder-ticket",
+        discoveryError: "Error sending http request: connection reset",
+        capture: null,
+        subscription: null,
+        connection: null,
+        networkBitrate: null,
+        error: null,
+      },
+    });
+    expect(parsed.data.joinTicket).toBe("lastorder-ticket");
+    expect(parsed.data.discoveryError).toContain("connection reset");
+    expect(parsed.data.error).toBeNull();
   });
   it("拒绝未知的 WebSocket 事件", () => {
     expect(eventSchema.safeParse({ type: "unknown" }).success).toBe(false);

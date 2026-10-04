@@ -22,6 +22,7 @@ impl Handle {
             file_errors: Default::default(),
             join_code: None,
             join_ticket: None,
+            discovery_error: None,
             capture: None,
             subscription: None,
             connection: None,
@@ -115,7 +116,35 @@ impl Handle {
                 .send(Command::Diagnostics { reply })
                 .await
                 .context("应用已停止")?;
-            response.await.context("诊断读取已取消")
+            let mut diagnostics = response.await.context("诊断读取已取消")?;
+            if let Some(connections) = diagnostics["connections"].as_array_mut() {
+                futures_util::future::join_all(connections.iter_mut().map(|connection| async {
+                    let remote_id = connection["remoteId"]
+                        .as_str()
+                        .and_then(|id| id.parse::<iroh::EndpointId>().ok());
+                    let Some(remote_id) = remote_id else {
+                        return;
+                    };
+                    connection["remoteAddresses"] = match tokio::time::timeout(
+                        Duration::from_millis(250),
+                        self.endpoint.remote_info(remote_id),
+                    )
+                    .await
+                    {
+                        Ok(Some(info)) => json!({
+                            "status": "available",
+                            "addresses": info.addrs().map(|address| json!({
+                                "address": format!("{:?}", address.addr()),
+                                "usage": format!("{:?}", address.usage()),
+                            })).collect::<Vec<_>>(),
+                        }),
+                        Ok(None) => json!({"status": "unavailable", "addresses": null}),
+                        Err(_) => json!({"status": "timeout", "addresses": null}),
+                    };
+                }))
+                .await;
+            }
+            Ok(diagnostics)
         })
         .await
         .context("诊断读取超时")?

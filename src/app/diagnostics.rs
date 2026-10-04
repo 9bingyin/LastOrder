@@ -1,7 +1,28 @@
+use iroh::Watcher as _;
+
 use super::*;
 
 impl Actor {
     pub(super) fn diagnostics(&self) -> Value {
+        let report = self.endpoint.net_report().get().map(|report| {
+            json!({
+                "udpV4": report.udp_v4,
+                "udpV6": report.udp_v6,
+                "mappingVariesByDestIpv4": report.mapping_varies_by_dest_ipv4,
+                "mappingVariesByDestIpv6": report.mapping_varies_by_dest_ipv6,
+                "globalV4": report.global_v4,
+                "globalV6": report.global_v6,
+                "preferredRelay": report.preferred_relay,
+                "captivePortal": report.captive_portal,
+                "relayLatencies": report.relay_latency.iter().map(|(probe, relay, latency)| json!({
+                    "probe": format!("{probe:?}"),
+                    "relay": relay,
+                    "latencyMs": latency.as_secs_f64() * 1000.0,
+                })).collect::<Vec<_>>(),
+            })
+        });
+        let metrics = self.endpoint.metrics();
+        let address = self.endpoint.addr();
         let connection = |peer: &RemotePeer, role: &str| {
             let connection = &peer.connection;
             let paths = connection.paths();
@@ -69,6 +90,26 @@ impl Actor {
             "snapshot": snapshot,
             "endpointAddressRaw": format!("{:#?}", self.endpoint.addr()),
             "boundSockets": self.endpoint.bound_sockets(),
+            "network": {
+                "localIpAddresses": address.ip_addrs().map(ToString::to_string).collect::<Vec<_>>(),
+                "relayUrls": address.relay_urls().map(ToString::to_string).collect::<Vec<_>>(),
+                "report": report,
+                "counters": {
+                    "scope": "endpoint_lifetime",
+                    "reports": metrics.net_report.reports.get(),
+                    "holepunchAttempts": metrics.socket.holepunch_attempts.get(),
+                    "directPathsOpened": metrics.socket.paths_direct.get(),
+                    "relayPathsOpened": metrics.socket.paths_relay.get(),
+                    "relayConnectionsFailed": metrics.socket.relay_conns_failed.get(),
+                    "relayConnectionsRateLimited": metrics.socket.relay_conns_ratelimited.get(),
+                },
+                "portMapping": {
+                    "scope": "endpoint_lifetime",
+                    "attempts": metrics.net_report.portmap_attempts.get(),
+                    "externalAddressUpdates": metrics.net_report.portmap_external_address_updated.get(),
+                    "changeEvents": metrics.socket.actor_tick_portmap_changed.get(),
+                },
+            },
             "connections": connections,
             "localWebRtc": self.rtc.iter().map(|(id, peer)| (id.clone(), json!({
                 "clientId": peer.client,

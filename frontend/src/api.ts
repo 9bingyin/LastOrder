@@ -54,6 +54,7 @@ const snapshotSchema = z.object({
   fileClients: z.record(z.string(), z.string()).default({}),
   joinCode: z.string().nullable(),
   joinTicket: z.string().nullable().default(null),
+  discoveryError: z.string().nullable().default(null),
   capture: localMediaSchema.nullable(),
   subscription: localMediaSchema.nullable(),
   connection: z

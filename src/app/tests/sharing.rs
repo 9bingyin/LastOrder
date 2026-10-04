@@ -305,6 +305,7 @@ async fn a_full_stop_queue_disconnects_and_releases_the_live_slot() -> Result<()
         subscription: None,
         connection: None,
         network_bitrate: None,
+        discovery_error: None,
         error: None,
     };
     let (snapshots, _) = watch::channel(state.clone());

@@ -17,6 +17,8 @@ pub enum Discovery {
     Public(PkarrRelayClient),
     #[cfg(test)]
     Memory(std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, EndpointAddr>>>),
+    #[cfg(test)]
+    Unavailable,
 }
 
 impl Discovery {
@@ -44,6 +46,8 @@ impl Discovery {
                     .context("发布房间入口超时")??;
             }
             #[cfg(test)]
+            Self::Unavailable => anyhow::bail!("模拟发现服务不可用"),
+            #[cfg(test)]
             Self::Memory(records) => {
                 records
                     .lock()
@@ -70,6 +74,8 @@ impl Discovery {
                 Ok(EndpointAddr::from(id).with_addrs(info.addrs().cloned()))
             }
             #[cfg(test)]
+            Self::Unavailable => anyhow::bail!("模拟发现服务不可用"),
+            #[cfg(test)]
             Self::Memory(records) => records
                 .lock()
                 .map_err(|_| anyhow::anyhow!("测试发现状态不可用"))?
@@ -79,7 +85,13 @@ impl Discovery {
         }
     }
 
-    pub async fn refresh(self, code: RoomCode, endpoint: Endpoint, cancel: CancellationToken) {
+    pub async fn refresh(
+        self,
+        code: RoomCode,
+        endpoint: Endpoint,
+        cancel: CancellationToken,
+        app: crate::app::Handle,
+    ) {
         let mut interval = tokio::time::interval(Duration::from_secs(30));
         interval.tick().await;
         loop {
@@ -91,7 +103,15 @@ impl Discovery {
                         biased;
                         _ = cancel.cancelled() => break,
                         result = self.publish(&code, &endpoint) => {
-                            if let Err(error) = result { tracing::warn!(%error, "刷新房间入口失败"); }
+                            let error = result.err().map(|error| {
+                                tracing::warn!(error = %format!("{error:#}"), "刷新房间入口失败");
+                                format!("{error:#}")
+                            });
+                            tokio::select! {
+                                biased;
+                                _ = cancel.cancelled() => break,
+                                _ = app.network(crate::app::NetworkEvent::DiscoveryUpdated { room_id: code.id(), error }) => {}
+                            }
                         }
                     }
                 }

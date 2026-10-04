@@ -193,6 +193,7 @@ fn budget_actor(app: &TestApp) -> Result<Actor> {
         subscription: None,
         connection: None,
         network_bitrate: None,
+        discovery_error: None,
         error: None,
     };
     let (snapshots, _) = watch::channel(state.clone());

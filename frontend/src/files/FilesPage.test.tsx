@@ -34,6 +34,7 @@ function makeSession(files: SharedFile[] = []): FileSession {
     fileClients: {},
     joinCode: null,
     joinTicket: null,
+    discoveryError: null,
     capture: null,
     subscription: null,
     connection: null,

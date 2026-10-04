@@ -7,16 +7,14 @@ impl Actor {
                 self.require_idle()?;
                 let name = validate_name(&name)?;
                 let code = RoomCode::generate()?;
-                self.discovery
+                self.state.discovery_error = self.discovery
                     .publish(&code, &self.endpoint)
                     .await
-                    .map_err(|error| {
-                        fault(
-                            "discovery_unavailable",
-                            &format!("发布房间入口失败: {error}"),
-                            502,
-                        )
-                    })?;
+                    .err()
+                    .map(|error| {
+                        tracing::warn!(error = %format!("{error:#}"), "发布房间入口失败，使用 Ticket 邀请");
+                        format!("{error:#}")
+                    });
                 let id = self.endpoint.id().to_string();
                 let room = Room {
                     id: code.id(),
@@ -31,12 +29,16 @@ impl Actor {
                     code.clone(),
                     self.endpoint.clone(),
                     publisher.clone(),
+                    self.handle.clone(),
                 ));
                 self.publisher = Some(publisher);
                 self.code = Some(code);
                 self.state.room = Some(room.clone());
                 self.state.error = None;
-                Ok(json!({"room": room, "joinCode": self.state.join_code}))
+                self.state.join_ticket = self.ticket();
+                Ok(
+                    json!({"room": room, "joinCode": self.state.join_code, "joinTicket": self.state.join_ticket, "discoveryError": self.state.discovery_error}),
+                )
             }
             Operation::Join { code, name } => {
                 self.require_idle()?;
@@ -67,6 +69,7 @@ impl Actor {
                     })?;
                 self.state.room = Some(joined.room);
                 self.state.join_code = Some(code.id());
+                self.state.discovery_error = None;
                 self.state.error = None;
                 self.upstream = Some(RemotePeer {
                     connection: joined.connection.clone(),

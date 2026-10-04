@@ -191,6 +191,7 @@ impl Actor {
         self.code = None;
         self.state.room = None;
         self.state.join_code = None;
+        self.state.discovery_error = None;
         self.state.connection = None;
         self.state.network_bitrate = None;
         self.downstream_budget = None;
